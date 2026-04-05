@@ -265,45 +265,6 @@ def _sample_closest_loop_color_bmesh(obj, face_index, hit_local):
     return (c[0], c[1], c[2], c[3])
 
 
-def _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction, mesh=None):
-    """Find the vertex whose world-space position is closest to the ray. Returns (color, dist_sq) or (None, inf)."""
-    if mesh is None:
-        mesh = obj.data
-    matrix_world = obj.matrix_world
-    matrix_inv = matrix_world.inverted()
-    origin_local = matrix_inv @ ray_origin
-    dir_local = (matrix_inv.to_3x3() @ ray_direction).normalized()
-
-    colors = array('f', [0.0]) * (len(color_attr.data) * 4)
-    color_attr.data.foreach_get("color", colors)
-
-    vert_to_loop = {}
-    for loop in mesh.loops:
-        vert_to_loop.setdefault(loop.vertex_index, loop.index)
-
-    best_dist_sq = float('inf')
-    best_color = None
-
-    for vert in mesh.vertices:
-        li = vert_to_loop.get(vert.index)
-        if li is None:
-            continue
-        v = vert.co - origin_local
-        proj = v.dot(dir_local)
-        if proj < 0:
-            continue
-        dist_sq = (vert.co - (origin_local + dir_local * proj)).length_squared
-        if dist_sq < best_dist_sq:
-            best_dist_sq = dist_sq
-            base = li * 4
-            if base + 3 < len(colors):
-                best_color = (colors[base], colors[base + 1], colors[base + 2], colors[base + 3])
-
-    # dist_sq is in local space; scale to world space for cross-object comparison
-    scale = matrix_world.to_scale()
-    world_dist_sq = best_dist_sq * ((scale.x + scale.y + scale.z) / 3) ** 2
-    return best_color, world_dist_sq
-
 
 def pick_color_with_raycast(context, mouse_x, mouse_y):
     area, region, region_3d = find_view3d_window_region(context, mouse_x, mouse_y)
@@ -362,40 +323,6 @@ def pick_color_with_raycast(context, mouse_x, mouse_y):
             return (obj, color), None
         return None, f"'{obj.name}' has no painted Color attribute"
 
-    # No face hit — find the vertex nearest to the ray across all visible mesh objects
-    best_obj = None
-    best_color = None
-    best_dist_sq = float('inf')
-
-    candidates = []  # (obj, mesh) — mesh may be evaluated
-    edit_ptrs = set()
-    if context.mode == 'EDIT_MESH':
-        for obj in context.objects_in_mode_unique_data:
-            if obj.type == 'MESH':
-                edit_ptrs.add(obj.as_pointer())
-                candidates.append((obj, obj.data))
-                # Also add evaluated mesh for modifier-generated vertices
-                eval_obj = obj.evaluated_get(depsgraph)
-                eval_mesh = eval_obj.to_mesh()
-                if eval_mesh is not None and len(eval_mesh.vertices) > len(obj.data.vertices):
-                    candidates.append((obj, eval_mesh))
-    for obj in context.visible_objects:
-        if obj.type == 'MESH' and obj.as_pointer() not in edit_ptrs:
-            candidates.append((obj, obj.data))
-
-    for obj, mesh in candidates:
-        color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
-        if color_attr is None or color_attr.domain != 'CORNER' or len(color_attr.data) == 0:
-            continue
-        color, dist_sq = _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction, mesh=mesh)
-        if color is not None and dist_sq < best_dist_sq:
-            best_dist_sq = dist_sq
-            best_color = color
-            best_obj = obj
-
-    if best_obj is not None:
-        return (best_obj, best_color), None
-
     return None, "No mesh with vertex colors found under cursor"
 
 
@@ -414,12 +341,9 @@ class MESH_OT_pick_vertex_color(bpy.types.Operator):
             self.report({'ERROR'}, "No window manager available")
             return {'CANCELLED'}
 
-        if event.type != 'LEFTMOUSE':
-            return self.sample_at_cursor(context, event.mouse_x, event.mouse_y)
-
+        self._trigger_key = event.type
+        self.sample_at_cursor(context, event.mouse_x, event.mouse_y)
         context.window_manager.modal_handler_add(self)
-        if context.workspace is not None:
-            context.workspace.status_text_set("Vertex Color Tool: left-click a mesh in the 3D View, or right-click/Esc to cancel")
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
@@ -427,12 +351,14 @@ class MESH_OT_pick_vertex_color(bpy.types.Operator):
             self.finish(context)
             return {'CANCELLED'}
 
-        if event.type != 'LEFTMOUSE' or event.value != 'PRESS':
-            return {'PASS_THROUGH'}
+        if event.type == self._trigger_key and event.value == 'RELEASE':
+            self.finish(context)
+            return {'FINISHED'}
 
-        result = self.sample_at_cursor(context, event.mouse_x, event.mouse_y)
-        self.finish(context)
-        return result
+        if event.type == 'MOUSEMOVE':
+            self.sample_at_cursor(context, event.mouse_x, event.mouse_y)
+
+        return {'RUNNING_MODAL'}
 
     def finish(self, context):
         if context.workspace is not None:
@@ -441,17 +367,13 @@ class MESH_OT_pick_vertex_color(bpy.types.Operator):
     def sample_at_cursor(self, context, mouse_x, mouse_y):
         result, error_message = pick_color_with_raycast(context, mouse_x, mouse_y)
         if result is None:
-            self.report({'WARNING'}, error_message)
-            return {'CANCELLED'}
+            return
 
         source_obj, color_value = result
         context.scene.vertex_color_value = color_value
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
-
-        self.report({'INFO'}, f"Sampled color from '{source_obj.name}'")
-        return {'FINISHED'}
 
 
 def _has_selection_edit(context):
