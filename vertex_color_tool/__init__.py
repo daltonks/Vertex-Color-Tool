@@ -41,7 +41,11 @@ _classes = (
 
 def register():
     for cls in _classes:
-        bpy.utils.register_class(cls)
+        try:
+            bpy.utils.register_class(cls)
+        except ValueError:
+            bpy.utils.unregister_class(cls)
+            bpy.utils.register_class(cls)
 
     bpy.types.WindowManager.vertex_color_palette = bpy.props.CollectionProperty(
         type=VertexColorPaletteEntry,
@@ -58,13 +62,21 @@ def unregister():
     unregister_properties()
 
     reset_palette()
-    bpy.app.handlers.depsgraph_update_post.remove(on_depsgraph_update)
-    bpy.types.VIEW3D_HT_header.remove(draw_header)
+    if on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(on_depsgraph_update)
+    try:
+        bpy.types.VIEW3D_HT_header.remove(draw_header)
+    except ValueError:
+        pass
 
     for cls in reversed(_classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except RuntimeError:
+            pass
 
-    del bpy.types.WindowManager.vertex_color_palette
+    if hasattr(bpy.types.WindowManager, 'vertex_color_palette'):
+        del bpy.types.WindowManager.vertex_color_palette
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@ _color_refcounts = {}   # color_tuple -> int (number of meshes using it)
 _mesh_colors = {}       # mesh_name -> set of color_tuples
 _initialized = False
 
+_suppressing_updates = False
+_palette_snapshot = {}  # index -> color_tuple, captured when popup opens
+
 
 def _quantize(r, g, b, a):
     return (round(r, 2), round(g, 2), round(b, 2), round(a, 2))
@@ -46,15 +49,22 @@ def _collect_from_bmesh(mesh):
 
 def _write_to_ui(wm):
     """Sync _color_refcounts to the UI CollectionProperty, sorted by hue."""
-    palette = wm.vertex_color_palette
-    sorted_colors = sorted(
-        _color_refcounts,
-        key=lambda c: colorsys.rgb_to_hsv(c[0], c[1], c[2]),
-    )
-    palette.clear()
-    for color in sorted_colors:
-        entry = palette.add()
-        entry.color = color
+    global _suppressing_updates
+    _suppressing_updates = True
+    try:
+        palette = wm.vertex_color_palette
+        sorted_colors = sorted(
+            _color_refcounts,
+            key=lambda c: colorsys.rgb_to_hsv(c[0], c[1], c[2]),
+        )
+        palette.clear()
+        _palette_snapshot.clear()
+        for i, color in enumerate(sorted_colors):
+            entry = palette.add()
+            entry.color = color
+            _palette_snapshot[i] = color
+    finally:
+        _suppressing_updates = False
 
 
 def _update_single_mesh(mesh_name, new_colors):
@@ -82,6 +92,112 @@ def _update_single_mesh(mesh_name, new_colors):
     return changed
 
 
+# ---------------------------------------------------------------------------
+# Color replacement
+# ---------------------------------------------------------------------------
+
+def _replace_color_in_meshes(old_color, new_color):
+    """Replace all corners matching old_color with new_color across all meshes."""
+    global _suppressing_updates
+    mesh_names = [name for name, colors in _mesh_colors.items() if old_color in colors]
+    if not mesh_names:
+        return
+
+    _suppressing_updates = True
+    try:
+        nr, ng, nb, na = new_color
+        q = _quantize
+
+        for mesh_name in mesh_names:
+            mesh = bpy.data.meshes.get(mesh_name)
+            if mesh is None:
+                continue
+
+            is_edit = any(obj.mode == 'EDIT' for obj in bpy.data.objects
+                          if obj.type == 'MESH' and obj.data == mesh)
+
+            if is_edit:
+                bm = bmesh.from_edit_mesh(mesh)
+                layer = bm.loops.layers.float_color.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+                if layer is None:
+                    layer = bm.loops.layers.color.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+                if layer is None:
+                    continue
+                changed = False
+                for face in bm.faces:
+                    for loop in face.loops:
+                        c = loop[layer]
+                        if q(c[0], c[1], c[2], c[3]) == old_color:
+                            c[0], c[1], c[2], c[3] = nr, ng, nb, na
+                            changed = True
+                if changed:
+                    bmesh.update_edit_mesh(mesh)
+            else:
+                color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+                if color_attr is None or color_attr.domain != 'CORNER':
+                    continue
+
+                n = len(color_attr.data)
+                buf = array('f', [0.0]) * (n * 4)
+                color_attr.data.foreach_get("color", buf)
+
+                changed = False
+                for i in range(0, n * 4, 4):
+                    if q(buf[i], buf[i + 1], buf[i + 2], buf[i + 3]) == old_color:
+                        buf[i] = nr
+                        buf[i + 1] = ng
+                        buf[i + 2] = nb
+                        buf[i + 3] = na
+                        changed = True
+
+                if changed:
+                    color_attr.data.foreach_set("color", buf)
+                    mesh.update()
+
+        # Update internal bookkeeping
+        new_q = q(nr, ng, nb, na)
+        for mesh_name in mesh_names:
+            colors = _mesh_colors.get(mesh_name)
+            if colors and old_color in colors:
+                colors.discard(old_color)
+                colors.add(new_q)
+
+        old_count = _color_refcounts.pop(old_color, 0)
+        if old_count > 0:
+            _color_refcounts[new_q] = _color_refcounts.get(new_q, 0) + old_count
+    finally:
+        _suppressing_updates = False
+
+
+# ---------------------------------------------------------------------------
+# Property update callback
+# ---------------------------------------------------------------------------
+
+def _on_palette_color_changed(self, context):
+    if _suppressing_updates:
+        return
+
+    palette = context.window_manager.vertex_color_palette
+    index = next((i for i, entry in enumerate(palette) if entry == self), -1)
+    if index < 0:
+        return
+
+    old_color = _palette_snapshot.get(index)
+    if old_color is None:
+        return
+
+    new_color = _quantize(*self.color)
+    if old_color == new_color:
+        return
+
+    _replace_color_in_meshes(old_color, tuple(self.color))
+    _palette_snapshot[index] = new_color
+
+
+# ---------------------------------------------------------------------------
+# Rebuild / reset / depsgraph handler
+# ---------------------------------------------------------------------------
+
 def rebuild(scene):
     """Full scene scan — populates ref-counts from scratch."""
     wm = bpy.context.window_manager
@@ -105,11 +221,15 @@ def reset():
     _initialized = False
     _color_refcounts.clear()
     _mesh_colors.clear()
+    _palette_snapshot.clear()
 
 
 def on_depsgraph_update(scene, depsgraph):
     """Handler for bpy.app.handlers.depsgraph_update_post."""
     global _initialized
+    if _suppressing_updates:
+        return
+
     wm = bpy.context.window_manager
     if not hasattr(wm, 'vertex_color_palette'):
         return
@@ -140,7 +260,10 @@ def on_depsgraph_update(scene, depsgraph):
 # ---------------------------------------------------------------------------
 
 class VertexColorPaletteEntry(bpy.types.PropertyGroup):
-    color: bpy.props.FloatVectorProperty(subtype='COLOR', size=4, min=0.0, max=1.0)
+    color: bpy.props.FloatVectorProperty(
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        update=_on_palette_color_changed,
+    )
 
 
 class MESH_OT_select_palette_color(bpy.types.Operator):
@@ -159,7 +282,7 @@ class MESH_OT_select_palette_color(bpy.types.Operator):
 
 
 class MESH_OT_scene_color_palette(bpy.types.Operator):
-    """Browse all unique vertex colors currently in the scene"""
+    """Browse and edit all unique vertex colors currently in the scene. Changing a color updates every mesh that uses it"""
     bl_idname = "mesh.scene_color_palette"
     bl_label = "Scene Palette"
 
@@ -179,6 +302,7 @@ class MESH_OT_scene_color_palette(bpy.types.Operator):
         for i, entry in enumerate(palette):
             col = grid.column(align=True)
             col.prop(entry, "color", text="")
+            col.operator_context = 'EXEC_DEFAULT'
             op = col.operator("mesh.select_palette_color", text="Use")
             op.index = i
 
