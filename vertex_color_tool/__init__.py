@@ -51,8 +51,8 @@ def resolve_color_attribute(mesh, requested_name):
     return new_attr
 
 
-def get_target_loop_indices(obj, mesh, apply_mode, original_mode):
-    """Returns a list of loop indices to be colored."""
+def get_target_corner_indices(obj, mesh, apply_mode, original_mode):
+    """Returns a list of corner indices to be colored."""
     if original_mode == 'OBJECT':
         return list(range(len(mesh.loops))), "object"
 
@@ -74,7 +74,13 @@ def get_target_loop_indices(obj, mesh, apply_mode, original_mode):
         for f_idx in selected_face_indices:
             selected_vert_indices.update(mesh.polygons[f_idx].vertices)
 
-    return [l.index for l in mesh.loops if l.vertex_index in selected_vert_indices], "vertices"
+    return sorted(
+        {
+            loop.index
+            for loop in mesh.loops
+            if loop.vertex_index in selected_vert_indices
+        }
+    ), "vertices"
 
 
 def target_mesh_objects(context):
@@ -95,6 +101,10 @@ def target_mesh_objects(context):
 
 
 def paint_color_indices(color_attr, indices, color_value):
+    if len(indices) == len(color_attr.data):
+        color_attr.data.foreach_set("color", array('f', color_value) * len(color_attr.data))
+        return
+
     colors = array('f', [0.0]) * (len(color_attr.data) * 4)
     color_attr.data.foreach_get("color", colors)
 
@@ -143,7 +153,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
                 mesh.color_attributes.active_color_index = idx
                 mesh.color_attributes.render_color_index = idx
 
-                indices, _ = get_target_loop_indices(obj, mesh, apply_mode, original_mode)
+                indices, _ = get_target_corner_indices(obj, mesh, apply_mode, original_mode)
                 
                 if not indices:
                     continue
