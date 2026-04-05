@@ -1,92 +1,112 @@
 bl_info = {
     "name": "Vertex Color Tool",
-    "blender": (4, 5, 3),
+    "blender": (5, 0, 0),
     "category": "Mesh",
-    "version": (1, 2, 0),
-    "author": "BobHop",
-    "description": "Apply RGBA color to face corners with corner or vertex-style application"
+    "version": (1, 3, 0),
+    "author": "BobHop & Dalton Spillman",
+    "description": "Apply RGBA color to selected vertices and faces"
 }
+
+from array import array
 
 import bpy
 
-DEFAULT_COLOR_ATTRIBUTE_NAMES = ("Color", "Attribute")
-
-
-def initialize_color_data(color_attr, color_value=(1.0, 1.0, 1.0, 1.0)):
-    for item in color_attr.data:
-        item.color = color_value
+DEFAULT_COLOR_ATTRIBUTE_NAMES = ("Color", "Attribute", "Col")
 
 
 def resolve_color_attribute(mesh, requested_name):
+    """
+    Finds or creates a compatible FLOAT_COLOR CORNER attribute.
+    Ensures existing non-compatible attributes are not overwritten/deleted.
+    """
     attribute_name = requested_name or DEFAULT_COLOR_ATTRIBUTE_NAMES[0]
-
     color_attr = mesh.color_attributes.get(attribute_name)
-    if color_attr is not None and color_attr.domain == 'CORNER':
+
+    # 1. If it exists and matches our needs, use it
+    if color_attr is not None and color_attr.domain == 'CORNER' and color_attr.data_type == 'FLOAT_COLOR':
         return color_attr
 
-    if attribute_name in DEFAULT_COLOR_ATTRIBUTE_NAMES:
-        for name in DEFAULT_COLOR_ATTRIBUTE_NAMES:
-            fallback_attr = mesh.color_attributes.get(name)
-            if fallback_attr is not None and fallback_attr.domain == 'CORNER':
-                return fallback_attr
-
+    # 2. If name is taken by a different domain/type, find a fallback or unique name
     if color_attr is not None:
-        mesh.color_attributes.remove(color_attr)
+        # Check fallbacks
+        for name in DEFAULT_COLOR_ATTRIBUTE_NAMES:
+            fallback = mesh.color_attributes.get(name)
+            if fallback and fallback.domain == 'CORNER' and fallback.data_type == 'FLOAT_COLOR':
+                return fallback
 
-    mesh.color_attributes.new(name=attribute_name, type='FLOAT_COLOR', domain='CORNER')
-    color_attr = mesh.color_attributes[attribute_name]
-    initialize_color_data(color_attr)
-    return color_attr
+        # If still blocked, create a unique name to avoid deleting user data.
+        suffix = 1
+        base_name = f"{attribute_name}_VC"
+        attribute_name = base_name
+        while mesh.color_attributes.get(attribute_name) is not None:
+            suffix += 1
+            attribute_name = f"{base_name}_{suffix}"
+
+    # 3. Create new attribute
+    new_attr = mesh.color_attributes.new(name=attribute_name, type='FLOAT_COLOR', domain='CORNER')
+    
+    # Initialize with white
+    new_attr.data.foreach_set("color", [1.0, 1.0, 1.0, 1.0] * len(new_attr.data))
+    
+    return new_attr
 
 
-def activate_color_attribute(mesh, color_attr):
-    color_index = mesh.color_attributes.find(color_attr.name)
-    if color_index != -1:
-        mesh.color_attributes.active_color_index = color_index
-        mesh.color_attributes.render_color_index = color_index
+def get_target_loop_indices(obj, mesh, apply_mode, original_mode):
+    """Returns a list of loop indices to be colored."""
+    if original_mode == 'OBJECT':
+        return list(range(len(mesh.loops))), "object"
 
-
-def selected_loop_indices(obj, mesh, apply_mode, mode):
-    if mode == 'OBJECT':
-        if obj.select_get():
-            return list(range(len(mesh.loops))), "object"
-        return [], "object"
-
-    selected_face_indices = [poly.index for poly in mesh.polygons if poly.select]
-    selected_vertex_indices = {v.index for v in mesh.vertices if v.select}
+    # In Edit Mode, we need to check selection
+    selected_face_indices = [p.index for p in mesh.polygons if p.select]
+    selected_vert_indices = {v.index for v in mesh.vertices if v.select}
 
     if apply_mode == 'FACE':
-        if selected_face_indices:
-            return [
-                loop_index
-                for face_index in selected_face_indices
-                for loop_index in mesh.polygons[face_index].loop_indices
-            ], "faces"
-        return [], "faces"
+        if not selected_face_indices:
+            return [], "faces"
+        indices = []
+        for f_idx in selected_face_indices:
+            indices.extend(mesh.polygons[f_idx].loop_indices)
+        return indices, "faces"
 
+    # VERTEX mode: find all loops attached to selected vertices or faces
     if selected_face_indices:
-        vertex_indices = {
-            vertex_index
-            for face_index in selected_face_indices
-            for vertex_index in mesh.polygons[face_index].vertices
-        }
-        return [
-            loop.index
-            for loop in mesh.loops
-            if loop.vertex_index in vertex_indices
-        ], "faces"
+        # Expand selection to all vertices of selected faces
+        for f_idx in selected_face_indices:
+            selected_vert_indices.update(mesh.polygons[f_idx].vertices)
 
-    return [
-        loop.index
-        for loop in mesh.loops
-        if loop.vertex_index in selected_vertex_indices
-    ], "vertices"
+    return [l.index for l in mesh.loops if l.vertex_index in selected_vert_indices], "vertices"
 
 
 def target_mesh_objects(context):
     if context.mode == 'EDIT_MESH':
-        return [obj for obj in context.objects_in_mode if obj.type == 'MESH']
-    return [obj for obj in context.selected_objects if obj.type == 'MESH']
+        return [obj for obj in context.objects_in_mode_unique_data if obj.type == 'MESH']
+
+    objects = []
+    seen_meshes = set()
+    for obj in context.selected_objects:
+        if obj.type != 'MESH':
+            continue
+        mesh_ptr = obj.data.as_pointer()
+        if mesh_ptr in seen_meshes:
+            continue
+        seen_meshes.add(mesh_ptr)
+        objects.append(obj)
+    return objects
+
+
+def paint_color_indices(color_attr, indices, color_value):
+    colors = array('f', [0.0]) * (len(color_attr.data) * 4)
+    color_attr.data.foreach_get("color", colors)
+
+    r, g, b, a = color_value
+    for index in indices:
+        base = index * 4
+        colors[base] = r
+        colors[base + 1] = g
+        colors[base + 2] = b
+        colors[base + 3] = a
+
+    color_attr.data.foreach_set("color", colors)
 
 
 class MESH_OT_assign_vertex_color(bpy.types.Operator):
@@ -96,66 +116,57 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        objects = target_mesh_objects(context)
-        if not objects:
-            self.report({'ERROR'}, "No selected mesh objects")
-            return {'CANCELLED'}
-
-        color_value = context.scene.vertex_color_value
-        attribute_name = context.scene.vertex_color_attribute_name.strip() or "Color"
-        apply_mode = context.scene.vertex_color_apply_mode
-
         original_mode = context.mode
         was_in_edit = original_mode == 'EDIT_MESH'
-        if was_in_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
 
-        total_loops = 0
-        selection_source = None
-        attribute_names = set()
+        try:
+            objects = target_mesh_objects(context)
+            if not objects:
+                self.report({'ERROR'}, "No selected mesh objects")
+                return {'CANCELLED'}
 
-        for obj in objects:
-            mesh = obj.data
-            color_attr = resolve_color_attribute(mesh, attribute_name)
-            activate_color_attribute(mesh, color_attr)
+            if was_in_edit:
+                bpy.ops.object.mode_set(mode='OBJECT')
 
-            loop_indices, obj_selection_source = selected_loop_indices(
-                obj, mesh, apply_mode, original_mode
-            )
-            if not loop_indices:
-                continue
+            color_value = context.scene.vertex_color_value
+            attr_target_name = context.scene.vertex_color_attribute_name.strip()
+            apply_mode = context.scene.vertex_color_apply_mode
+            
+            total_loops_affected = 0
+            
+            for obj in objects:
+                mesh = obj.data
+                color_attr = resolve_color_attribute(mesh, attr_target_name)
+                
+                # Set as active for UI/Renderer
+                idx = mesh.color_attributes.find(color_attr.name)
+                mesh.color_attributes.active_color_index = idx
+                mesh.color_attributes.render_color_index = idx
 
-            for idx in loop_indices:
-                color_attr.data[idx].color = color_value
+                indices, _ = get_target_loop_indices(obj, mesh, apply_mode, original_mode)
+                
+                if not indices:
+                    continue
 
-            total_loops += len(loop_indices)
-            selection_source = obj_selection_source
-            attribute_names.add(color_attr.name)
+                paint_color_indices(color_attr, indices, color_value)
+                total_loops_affected += len(indices)
+                mesh.update()
 
-        if not total_loops:
-            self.report({'WARNING'}, "No selected object, vertices, or faces")
+            if total_loops_affected == 0:
+                self.report({'WARNING'}, "No geometry selected to color")
+            else:
+                self.report({'INFO'}, f"Colored {total_loops_affected} loops across {len(objects)} object(s)")
+
+        finally:
+            # Always return to the mode the user started in
             if was_in_edit:
                 bpy.ops.object.mode_set(mode='EDIT')
-            return {'CANCELLED'}
-
-        attribute_label = ", ".join(sorted(attribute_names))
-        self.report(
-            {'INFO'},
-            (
-                f"Applied corner color to {total_loops} loops on {len(objects)} object(s) "
-                f"from selected {selection_source} using '{attribute_label}'"
-            )
-        )
-
-        if was_in_edit:
-            bpy.ops.object.mode_set(mode='EDIT')
 
         return {'FINISHED'}
 
 
 class MESH_PT_vertex_color_panel(bpy.types.Panel):
-    """This panel applies face-corner color"""
-    bl_label = "Vertex Color"
+    bl_label = "Vertex Color Tool"
     bl_idname = "MESH_PT_vertex_color"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -163,23 +174,25 @@ class MESH_PT_vertex_color_panel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        scn = context.scene
 
-        layout.prop(context.scene, "vertex_color_apply_mode", text="Mode")
-        layout.prop(context.scene, "vertex_color_attribute_name", text="Attribute")
+        col = layout.column(align=True)
+        col.prop(scn, "vertex_color_apply_mode", text="Mode")
+        col.prop(scn, "vertex_color_attribute_name", text="Name")
 
+        layout.separator()
+        
         row = layout.row()
         row.label(text="Color:")
-        row.prop(context.scene, "vertex_color_value", text="")
+        row.prop(scn, "vertex_color_value", text="")
 
-        help_box = layout.box()
-        if context.scene.vertex_color_apply_mode == 'FACE':
-            help_box.label(text="Colors only the selected face corners.", icon='FACESEL')
-            help_box.label(text="Use this for sharp edge breaks.", icon='MOD_EDGESPLIT')
+        box = layout.box()
+        if scn.vertex_color_apply_mode == 'FACE':
+            box.label(text="Mode: Face Corner (Sharp)", icon='FACESEL')
         else:
-            help_box.label(text="Colors all loops using the selected vertices.", icon='VERTEXSEL')
-            help_box.label(text="This behaves like shared vertex color.", icon='MESH_DATA')
+            box.label(text="Mode: Vertex Style (Smooth)", icon='VERTEXSEL')
 
-        layout.operator("mesh.assign_vertex_color", text="Apply Color", icon='CHECKMARK')
+        layout.operator("mesh.assign_vertex_color", text="Apply to Selection", icon='CHECKMARK')
 
 
 def register():
@@ -188,21 +201,18 @@ def register():
 
     bpy.types.Scene.vertex_color_apply_mode = bpy.props.EnumProperty(
         name="Apply Mode",
-        description="How selection maps onto the face-corner color layer",
         items=[
-            ('VERTEX', "Vertex Style", "Color all loops using the selected vertices"),
-            ('FACE', "Face Corner", "Color only the selected face corners"),
+            ('VERTEX', "Vertex Style", "Color all loops sharing selected vertices"),
+            ('FACE', "Face Corner", "Color only loops within selected faces"),
         ],
         default='VERTEX',
     )
     bpy.types.Scene.vertex_color_attribute_name = bpy.props.StringProperty(
         name="Attribute Name",
-        description="Name of the face-corner color attribute to create or edit",
         default="Color",
     )
     bpy.types.Scene.vertex_color_value = bpy.props.FloatVectorProperty(
         name="Vertex Color",
-        description="RGBA color to apply to the selected geometry",
         subtype='COLOR',
         size=4,
         min=0.0,
@@ -214,7 +224,6 @@ def register():
 def unregister():
     bpy.utils.unregister_class(MESH_OT_assign_vertex_color)
     bpy.utils.unregister_class(MESH_PT_vertex_color_panel)
-
     del bpy.types.Scene.vertex_color_apply_mode
     del bpy.types.Scene.vertex_color_attribute_name
     del bpy.types.Scene.vertex_color_value
