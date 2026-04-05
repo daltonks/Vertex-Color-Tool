@@ -209,6 +209,9 @@ class MESH_OT_pick_vertex_color(bpy.types.Operator):
                     continue
 
                 context.scene.vertex_color_value = color_attr.data[indices[0]].color
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
                 self.report(
                     {'INFO'},
                     f"Loaded color from selected {selection_source} on '{obj.name}'"
@@ -303,6 +306,9 @@ class MESH_PT_vertex_color_panel(bpy.types.Panel):
         layout.operator("mesh.assign_vertex_color", text="Apply to Selection", icon='CHECKMARK')
 
 
+addon_keymaps = []
+
+
 def register():
     bpy.utils.register_class(MESH_OT_pick_vertex_color)
     bpy.utils.register_class(MESH_OT_assign_vertex_color)
@@ -325,8 +331,27 @@ def register():
         default=(1.0, 1.0, 1.0, 1.0)
     )
 
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        km = kc.keymaps.new(name="Mesh", space_type='EMPTY')
+        kmi = km.keymap_items.new("mesh.assign_vertex_color", 'V', 'PRESS', oskey=True, shift=True)
+        addon_keymaps.append((km, kmi))
+        kmi = km.keymap_items.new("mesh.pick_vertex_color", 'C', 'PRESS', oskey=True, shift=True)
+        addon_keymaps.append((km, kmi))
+
+        km = kc.keymaps.new(name="Object Mode", space_type='EMPTY')
+        kmi = km.keymap_items.new("mesh.assign_vertex_color", 'V', 'PRESS', oskey=True, shift=True)
+        addon_keymaps.append((km, kmi))
+        kmi = km.keymap_items.new("mesh.pick_vertex_color", 'C', 'PRESS', oskey=True, shift=True)
+        addon_keymaps.append((km, kmi))
+
 
 def unregister():
+    for km, kmi in addon_keymaps:
+        km.keymap_items.remove(kmi)
+    addon_keymaps.clear()
+
     bpy.utils.unregister_class(MESH_OT_pick_vertex_color)
     bpy.utils.unregister_class(MESH_OT_assign_vertex_color)
     bpy.utils.unregister_class(MESH_PT_vertex_color_panel)
