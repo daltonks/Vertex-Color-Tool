@@ -87,15 +87,17 @@ class MESH_OT_edit_palette_color(bpy.types.Operator):
         self.layout.prop(self, "color", text="")
 
 
+
 class MESH_OT_trim_palette(bpy.types.Operator):
-    """Remove colors from the palette that are no longer used by any mesh in the scene"""
+    """Sync the palette with the scene, removing colors no longer used by any mesh"""
     bl_idname = "mesh.trim_palette"
-    bl_label = "Trim Unused"
+    bl_label = "Refresh Palette"
     bl_options = {'INTERNAL'}
 
     def execute(self, context):
-        state.trim(context.scene)
-        _preview_collection.clear()
+        if state.reconcile(context.scene):
+            _preview_collection.clear()
+            state.write_to_ui(context.window_manager)
         return {'FINISHED'}
 
 
@@ -154,7 +156,8 @@ class MESH_PT_vertex_color_tool(bpy.types.Panel):
             op = grid.operator("mesh.use_palette_color", text="", icon_value=icon_id)
             op.index = i
 
-        layout.operator("mesh.trim_palette", icon='BRUSH_DATA')
+        layout.operator("mesh.trim_palette", icon='FILE_REFRESH')
+
 
 
 

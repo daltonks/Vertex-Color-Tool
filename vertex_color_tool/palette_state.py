@@ -76,26 +76,38 @@ def write_to_ui(wm):
         suppressing_updates = False
 
 
-def ensure_scanned(scene):
-    """Scan the scene if it hasn't been scanned yet. Called when palette is accessed."""
-    global _scanned
-    if _scanned:
-        return
-    _scanned = True
+def reconcile(scene):
+    """Full rebuild from scene meshes. Preserves order for existing colors."""
+    scene_colors = set()
     for obj in scene.objects:
         if obj.type != 'MESH':
             continue
         if obj.mode == 'EDIT':
-            colors = collect_from_bmesh(obj.data)
+            scene_colors |= collect_from_bmesh(obj.data)
         else:
-            colors = collect_from_mesh(obj.data)
-        for c in colors:
-            if c not in _palette_set:
-                _palette_set.add(c)
-                _palette_colors.append(c)
-    wm = bpy.context.window_manager
-    if hasattr(wm, 'vertex_color_palette'):
-        write_to_ui(wm)
+            scene_colors |= collect_from_mesh(obj.data)
+
+    if scene_colors == _palette_set:
+        return False
+
+    kept = [c for c in _palette_colors if c in scene_colors]
+    new = scene_colors - _palette_set
+    _palette_colors[:] = kept + list(new)
+    _palette_set.clear()
+    _palette_set.update(scene_colors)
+    return True
+
+
+def ensure_scanned(scene):
+    """Scan the scene once on first access."""
+    global _scanned
+    if _scanned:
+        return
+    _scanned = True
+    if reconcile(scene):
+        wm = bpy.context.window_manager
+        if hasattr(wm, 'vertex_color_palette'):
+            write_to_ui(wm)
 
 
 def add_colors(colors):
@@ -119,24 +131,6 @@ def remove_color(color):
         pass
 
 
-def trim(scene):
-    """Remove palette colors not present in any mesh. Only scans when called."""
-    scene_colors = set()
-    for obj in scene.objects:
-        if obj.type != 'MESH':
-            continue
-        if obj.mode == 'EDIT':
-            scene_colors |= collect_from_bmesh(obj.data)
-        else:
-            scene_colors |= collect_from_mesh(obj.data)
-    kept = [c for c in _palette_colors if c in scene_colors]
-    _palette_colors[:] = kept
-    _palette_set.clear()
-    _palette_set.update(kept)
-    wm = bpy.context.window_manager
-    if hasattr(wm, 'vertex_color_palette'):
-        write_to_ui(wm)
-
 
 def reset():
     """Clear all palette state (used on unregister)."""
@@ -157,22 +151,8 @@ def on_file_loaded(*_args):
 
 
 def on_undo_redo(scene):
-    """Handler for undo_post/redo_post — full additive scan."""
-    added = False
-    for obj in scene.objects:
-        if obj.type != 'MESH':
-            continue
-        if obj.mode == 'EDIT':
-            colors = collect_from_bmesh(obj.data)
-        else:
-            colors = collect_from_mesh(obj.data)
-        new = colors - _palette_set
-        if new:
-            _palette_set.update(new)
-            _palette_colors.extend(new)
-            added = True
-
-    if added:
+    """Handler for undo_post/redo_post — full reconciliation."""
+    if reconcile(scene):
         wm = bpy.context.window_manager
         if hasattr(wm, 'vertex_color_palette'):
             write_to_ui(wm)
