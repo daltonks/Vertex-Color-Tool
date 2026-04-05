@@ -133,16 +133,12 @@ class MESH_PT_vertex_color_tool(bpy.types.Panel):
         layout = self.layout
         scn = context.scene
 
-        if not hasattr(scn, 'vertex_color_apply_mode'):
+        if not hasattr(scn, 'vertex_color_value'):
             return
 
         row = layout.row(align=True)
         row.prop(scn, "vertex_color_value", text="")
         row.operator("mesh.edit_palette_color", text="", icon='GREASEPENCIL')
-
-        row = layout.row(align=True)
-        mode_icon = 'FACESEL' if scn.vertex_color_apply_mode == 'FACE' else 'VERTEXSEL'
-        row.prop(scn, "vertex_color_apply_mode", text="", icon=mode_icon)
         row.operator("mesh.vertex_color_shortcuts", text="", icon='INFO')
 
         state.ensure_scanned(context.scene)

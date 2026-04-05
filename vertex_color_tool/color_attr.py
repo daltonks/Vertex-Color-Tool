@@ -110,22 +110,16 @@ def paint_color_indices(color_attr, indices, color_value):
     color_attr.data.foreach_set("color", colors)
 
 
-def get_target_corner_indices(obj, mesh, apply_mode, original_mode, bm=None):
-    """Return (indices, description) for the corners that should be painted."""
+def get_target_corner_indices(obj, mesh, original_mode, bm=None):
+    """Return (indices, description) for the corners that should be painted.
+
+    In object mode, all corners are targeted. In edit mode, corners are
+    collected from all selected vertices, edges, and faces.
+    """
     if original_mode == 'OBJECT':
         return list(range(len(mesh.loops))), "object"
 
     if bm is not None:
-        if apply_mode == 'FACE':
-            indices = []
-            for f in bm.faces:
-                if f.select:
-                    indices.extend(mesh.polygons[f.index].loop_indices)
-            if indices:
-                return indices, "faces"
-            # No fully-selected faces — fall back to vertex-based painting
-            # so individual vertex/edge selections still work.
-
         sel_verts = set()
         for v in bm.verts:
             if v.select:
@@ -139,15 +133,6 @@ def get_target_corner_indices(obj, mesh, apply_mode, original_mode, bm=None):
         return sorted(l.index for l in mesh.loops if l.vertex_index in sel_verts), "vertices"
 
     # Fallback: read from mesh data (object mode)
-    if apply_mode == 'FACE':
-        selected = [p.index for p in mesh.polygons if p.select]
-        if not selected:
-            return [], "faces"
-        indices = []
-        for fi in selected:
-            indices.extend(mesh.polygons[fi].loop_indices)
-        return indices, "faces"
-
     sel_verts = {v.index for v in mesh.vertices if v.select}
     for p in mesh.polygons:
         if p.select:

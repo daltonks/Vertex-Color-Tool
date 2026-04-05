@@ -51,8 +51,6 @@ def _resolve_selection_targets(context):
     if not objects:
         return None, was_in_edit
 
-    apply_mode = context.scene.vertex_color_apply_mode
-
     if was_in_edit:
         targets = []
         for obj in objects:
@@ -61,13 +59,13 @@ def _resolve_selection_targets(context):
             bm.verts.ensure_lookup_table()
             bm.edges.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
-            indices, _ = get_target_corner_indices(obj, obj.data, apply_mode, original_mode, bm)
+            indices, _ = get_target_corner_indices(obj, obj.data, original_mode, bm)
             if indices:
                 targets.append((obj, indices))
     else:
         targets = []
         for obj in objects:
-            indices = get_target_corner_indices(obj, obj.data, apply_mode, original_mode)[0]
+            indices = get_target_corner_indices(obj, obj.data, original_mode)[0]
             if indices:
                 targets.append((obj, indices))
 
@@ -98,7 +96,7 @@ def _paint_targets(targets, color_value, was_in_edit):
 
 
 class MESH_OT_assign_vertex_color(bpy.types.Operator):
-    """Paint the active color onto selected geometry. With nothing selected, paints the face under the cursor instead"""
+    """Paint the active color onto selected geometry. With nothing selected, paints under the cursor instead"""
     bl_idname = "mesh.assign_vertex_color"
     bl_label = "Paint Selection"
     bl_options = {'REGISTER', 'UNDO'}

@@ -3,21 +3,7 @@ import sys
 import bpy
 
 
-
 def register_properties():
-    bpy.types.Scene.vertex_color_apply_mode = bpy.props.EnumProperty(
-        name="Apply Mode",
-        description="How color is applied to geometry",
-        items=[
-            ('VERTEX', "Vertex Style",
-             "Color blends smoothly across faces sharing a vertex. "
-             "Select vertices or edges to paint them"),
-            ('FACE', "Face Corner",
-             "Color is applied per face corner, creating sharp boundaries between faces. "
-             "Select whole faces for sharp fills, or individual vertices/edges for partial painting"),
-        ],
-        default='FACE',
-    )
     bpy.types.Scene.vertex_color_value = bpy.props.FloatVectorProperty(
         name="Color",
         description="The color to paint onto selected geometry",
@@ -30,7 +16,6 @@ def register_properties():
 
 
 def unregister_properties():
-    del bpy.types.Scene.vertex_color_apply_mode
     del bpy.types.Scene.vertex_color_value
 
 

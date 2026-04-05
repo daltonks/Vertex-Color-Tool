@@ -1,6 +1,5 @@
 """Palette state: additive color tracking across all meshes in the scene."""
 
-import colorsys
 from array import array
 
 import bpy
@@ -8,8 +7,9 @@ import bmesh
 
 from .color_attr import CANONICAL_COLOR_ATTRIBUTE_NAME
 
-_palette_colors = set()  # set of quantized color tuples
-_scanned = False  # True after first full scene scan
+_palette_colors = []   # list of quantized color tuples, insertion order
+_palette_set = set()   # for fast membership checks
+_scanned = False
 
 suppressing_updates = False
 palette_snapshot = {}  # index -> color_tuple, for the edit operator
@@ -44,16 +44,28 @@ def collect_from_bmesh(mesh):
             for face in bm.faces for loop in face.loops for c in (loop[layer],)}
 
 
+def _sort_key(c):
+    """Sort by perceived lightness first, then hue, then saturation.
+
+    Groups visually similar colors together — all darks together, all brights
+    together, with hue ordering within each lightness level.
+    """
+    import colorsys
+    h, s, v = colorsys.rgb_to_hsv(c[0], c[1], c[2])
+    # Perceived lightness (0-1), quantized into bands so similar
+    # lightness levels group together
+    lightness = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+    lightness_band = round(lightness, 1)
+    return (-lightness_band, (h + 0.05) % 1.0, -s)
+
+
 def write_to_ui(wm):
-    """Sync _palette_colors to the UI CollectionProperty, sorted by hue."""
+    """Sync _palette_colors to the UI CollectionProperty, sorted for visual clarity."""
     global suppressing_updates
     suppressing_updates = True
     try:
         palette = wm.vertex_color_palette
-        sorted_colors = sorted(
-            _palette_colors,
-            key=lambda c: colorsys.rgb_to_hsv(c[0], c[1], c[2]),
-        )
+        sorted_colors = sorted(_palette_colors, key=_sort_key)
         palette.clear()
         palette_snapshot.clear()
         for i, color in enumerate(sorted_colors):
@@ -74,9 +86,13 @@ def ensure_scanned(scene):
         if obj.type != 'MESH':
             continue
         if obj.mode == 'EDIT':
-            _palette_colors.update(collect_from_bmesh(obj.data))
+            colors = collect_from_bmesh(obj.data)
         else:
-            _palette_colors.update(collect_from_mesh(obj.data))
+            colors = collect_from_mesh(obj.data)
+        for c in colors:
+            if c not in _palette_set:
+                _palette_set.add(c)
+                _palette_colors.append(c)
     wm = bpy.context.window_manager
     if hasattr(wm, 'vertex_color_palette'):
         write_to_ui(wm)
@@ -84,10 +100,11 @@ def ensure_scanned(scene):
 
 def add_colors(colors):
     """Add colors to the palette. Updates UI if any are new."""
-    new = colors - _palette_colors
+    new = colors - _palette_set
     if not new:
         return
-    _palette_colors.update(new)
+    _palette_set.update(new)
+    _palette_colors.extend(new)
     wm = bpy.context.window_manager
     if hasattr(wm, 'vertex_color_palette'):
         write_to_ui(wm)
@@ -95,7 +112,11 @@ def add_colors(colors):
 
 def remove_color(color):
     """Remove a single color from the palette."""
-    _palette_colors.discard(color)
+    _palette_set.discard(color)
+    try:
+        _palette_colors.remove(color)
+    except ValueError:
+        pass
 
 
 def trim(scene):
@@ -108,7 +129,10 @@ def trim(scene):
             scene_colors |= collect_from_bmesh(obj.data)
         else:
             scene_colors |= collect_from_mesh(obj.data)
-    _palette_colors.intersection_update(scene_colors)
+    kept = [c for c in _palette_colors if c in scene_colors]
+    _palette_colors[:] = kept
+    _palette_set.clear()
+    _palette_set.update(kept)
     wm = bpy.context.window_manager
     if hasattr(wm, 'vertex_color_palette'):
         write_to_ui(wm)
@@ -119,6 +143,7 @@ def reset():
     global _scanned
     _scanned = False
     _palette_colors.clear()
+    _palette_set.clear()
     palette_snapshot.clear()
 
 
@@ -127,31 +152,27 @@ def on_file_loaded(*_args):
     global _scanned
     _scanned = False
     _palette_colors.clear()
+    _palette_set.clear()
     palette_snapshot.clear()
 
 
 def on_undo_redo(scene):
-    """Handler for undo_post/redo_post — full additive scan.
-
-    Module-level palette state doesn't participate in Blender's undo, so
-    colors removed by palette edits may reappear in meshes after undo.
-    A full scan is the only reliable way to catch them.
-    """
+    """Handler for undo_post/redo_post — full additive scan."""
     added = False
     for obj in scene.objects:
         if obj.type != 'MESH':
             continue
         if obj.mode == 'EDIT':
-            new = collect_from_bmesh(obj.data) - _palette_colors
+            colors = collect_from_bmesh(obj.data)
         else:
-            new = collect_from_mesh(obj.data) - _palette_colors
+            colors = collect_from_mesh(obj.data)
+        new = colors - _palette_set
         if new:
-            _palette_colors.update(new)
+            _palette_set.update(new)
+            _palette_colors.extend(new)
             added = True
 
     if added:
         wm = bpy.context.window_manager
         if hasattr(wm, 'vertex_color_palette'):
             write_to_ui(wm)
-
-
