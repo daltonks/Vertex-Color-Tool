@@ -2,7 +2,7 @@ bl_info = {
     "name": "Vertex Color Tool",
     "blender": (5, 0, 0),
     "category": "Mesh",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "author": "BobHop & Dalton Spillman",
     "description": "Apply RGBA color to selected vertices and faces"
 }
@@ -11,9 +11,13 @@ from array import array
 import sys
 
 import bpy
+import bmesh
+from bpy_extras import view3d_utils
+from mathutils.bvhtree import BVHTree
 
 DEFAULT_COLOR_ATTRIBUTE_NAMES = ("Color", "Attribute", "Col")
 CANONICAL_COLOR_ATTRIBUTE_NAME = "Color"
+
 
 
 def color_attr_sort_key(color_attr):
@@ -176,54 +180,325 @@ def paint_color_indices(color_attr, indices, color_value):
     color_attr.data.foreach_set("color", colors)
 
 
+def find_view3d_window_region(context, mouse_x, mouse_y):
+    for area in context.window.screen.areas:
+        if area.type != 'VIEW_3D':
+            continue
+        for region in area.regions:
+            if region.type != 'WINDOW':
+                continue
+            if region.x <= mouse_x < region.x + region.width and region.y <= mouse_y < region.y + region.height:
+                return area, region, area.spaces.active.region_3d
+    return None, None, None
+
+
+def _bvh_raycast(obj, ray_origin, ray_direction):
+    """Ray cast against an edit-mode object using a BVH tree. Returns (dist_sq, face_index, location_local) or None."""
+    mesh = obj.data
+    if not mesh.polygons or not mesh.vertices:
+        return None
+    matrix_world = obj.matrix_world
+    matrix_inv = matrix_world.inverted()
+    origin_local = matrix_inv @ ray_origin
+    dir_local = (matrix_inv.to_3x3() @ ray_direction).normalized()
+    bvh = BVHTree.FromPolygons(
+        [v.co.copy() for v in mesh.vertices],
+        [tuple(p.vertices) for p in mesh.polygons],
+    )
+    location_local, _, face_index, _ = bvh.ray_cast(origin_local, dir_local)
+    if location_local is None or face_index is None or face_index < 0:
+        return None
+    dist_sq = (matrix_world @ location_local - ray_origin).length_squared
+    return dist_sq, face_index, location_local
+
+
+def _sample_closest_loop_color(mesh, color_attr, face_index, hit_local):
+    """Return the color of the loop whose vertex is closest to hit_local."""
+    polygon = mesh.polygons[face_index]
+    loop_indices = list(polygon.loop_indices)
+    if not loop_indices:
+        return None
+
+    colors = array('f', [0.0]) * (len(color_attr.data) * 4)
+    color_attr.data.foreach_get("color", colors)
+
+    best_li = min(
+        loop_indices,
+        key=lambda li: (mesh.vertices[mesh.loops[li].vertex_index].co - hit_local).length_squared
+    )
+    base = best_li * 4
+    if base + 3 >= len(colors):
+        return None
+    return (colors[base], colors[base + 1], colors[base + 2], colors[base + 3])
+
+
+def _sample_closest_loop_color_bmesh(obj, face_index, hit_local):
+    """Sample color from BMesh directly (required in edit mode, where obj.data color data is stale)."""
+    bm = bmesh.from_edit_mesh(obj.data)
+    color_layer = bm.loops.layers.float_color.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+    if color_layer is None:
+        color_layer = bm.loops.layers.color.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+    if color_layer is None:
+        return None
+    bm.faces.ensure_lookup_table()
+    if face_index >= len(bm.faces):
+        return None
+    face = bm.faces[face_index]
+    best_loop = min(face.loops, key=lambda l: (l.vert.co - hit_local).length_squared)
+    c = best_loop[color_layer]
+    return (c[0], c[1], c[2], c[3])
+
+
+def _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction):
+    """Find the vertex whose world-space position is closest to the ray. Returns (color, dist_sq) or (None, inf)."""
+    mesh = obj.data
+    matrix_world = obj.matrix_world
+    matrix_inv = matrix_world.inverted()
+    origin_local = matrix_inv @ ray_origin
+    dir_local = (matrix_inv.to_3x3() @ ray_direction).normalized()
+
+    colors = array('f', [0.0]) * (len(color_attr.data) * 4)
+    color_attr.data.foreach_get("color", colors)
+
+    vert_to_loop = {}
+    for loop in mesh.loops:
+        vert_to_loop.setdefault(loop.vertex_index, loop.index)
+
+    best_dist_sq = float('inf')
+    best_color = None
+
+    for vert in mesh.vertices:
+        li = vert_to_loop.get(vert.index)
+        if li is None:
+            continue
+        v = vert.co - origin_local
+        proj = v.dot(dir_local)
+        if proj < 0:
+            continue
+        dist_sq = (vert.co - (origin_local + dir_local * proj)).length_squared
+        if dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            base = li * 4
+            if base + 3 < len(colors):
+                best_color = (colors[base], colors[base + 1], colors[base + 2], colors[base + 3])
+
+    # dist_sq is in local space; scale to world space for cross-object comparison
+    scale = matrix_world.to_scale()
+    world_dist_sq = best_dist_sq * ((scale.x + scale.y + scale.z) / 3) ** 2
+    return best_color, world_dist_sq
+
+
+def pick_color_with_raycast(context, mouse_x, mouse_y):
+    area, region, region_3d = find_view3d_window_region(context, mouse_x, mouse_y)
+    if region is None or region_3d is None:
+        return None, "Click inside a 3D Viewport"
+
+    coord = (mouse_x - region.x, mouse_y - region.y)
+    ray_origin = view3d_utils.region_2d_to_origin_3d(region, region_3d, coord)
+    ray_direction = view3d_utils.region_2d_to_vector_3d(region, region_3d, coord)
+
+    depsgraph = context.evaluated_depsgraph_get()
+    best_hit = None  # (dist_sq, obj, mesh, face_index, location_local)
+
+    # Edit-mode objects: scene.ray_cast skips them, so use BVH
+    if context.mode == 'EDIT_MESH':
+        for obj in context.objects_in_mode_unique_data:
+            if obj.type != 'MESH':
+                continue
+            obj.update_from_editmode()
+            hit = _bvh_raycast(obj, ray_origin, ray_direction)
+            if hit is None:
+                continue
+            dist_sq, face_index, location_local = hit
+            if best_hit is None or dist_sq < best_hit[0]:
+                best_hit = (dist_sq, obj, obj.data, face_index, location_local)
+
+    # All other visible objects
+    result, location, _, face_index, hit_obj, matrix = context.scene.ray_cast(depsgraph, ray_origin, ray_direction)
+    if result and hit_obj and hit_obj.type == 'MESH' and hit_obj.mode != 'EDIT':
+        dist_sq = (location - ray_origin).length_squared
+        if best_hit is None or dist_sq < best_hit[0]:
+            location_local = matrix.inverted() @ location
+            best_hit = (dist_sq, hit_obj, hit_obj.data, face_index, location_local)
+
+    if best_hit is not None:
+        _, obj, mesh, face_index, location_local = best_hit
+        if obj.mode == 'EDIT':
+            color = _sample_closest_loop_color_bmesh(obj, face_index, location_local)
+        else:
+            color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+            color = None
+            if color_attr is not None and color_attr.domain == 'CORNER' and len(color_attr.data) > 0:
+                color = _sample_closest_loop_color(mesh, color_attr, face_index, location_local)
+        if color is not None:
+            return (obj, color), None
+        return None, f"'{obj.name}' has no painted Color attribute"
+
+    # No face hit — find the vertex nearest to the ray across all visible mesh objects
+    best_obj = None
+    best_color = None
+    best_dist_sq = float('inf')
+
+    candidates = []
+    edit_ptrs = set()
+    if context.mode == 'EDIT_MESH':
+        for obj in context.objects_in_mode_unique_data:
+            if obj.type == 'MESH':
+                edit_ptrs.add(obj.as_pointer())
+                candidates.append(obj)
+    for obj in context.visible_objects:
+        if obj.type == 'MESH' and obj.as_pointer() not in edit_ptrs:
+            candidates.append(obj)
+
+    for obj in candidates:
+        color_attr = obj.data.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+        if color_attr is None or color_attr.domain != 'CORNER' or len(color_attr.data) == 0:
+            continue
+        color, dist_sq = _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction)
+        if color is not None and dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            best_color = color
+            best_obj = obj
+
+    if best_obj is not None:
+        return (best_obj, best_color), None
+
+    return None, "No mesh with vertex colors found under cursor"
+
+
 class MESH_OT_pick_vertex_color(bpy.types.Operator):
-    """Load the stored Color attribute from the current selection"""
+    """Sample the stored Color attribute under the cursor"""
     bl_idname = "mesh.pick_vertex_color"
-    bl_label = "Use Selected Color"
+    bl_label = "Pick Vertex Color"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        objects = target_mesh_objects(context)
-        if not objects:
-            self.report({'ERROR'}, "No selected mesh objects")
+        self.report({'INFO'}, "Run this from a 3D View and click a mesh to sample its color")
+        return {'CANCELLED'}
+
+    def invoke(self, context, event):
+        if context.window_manager is None:
+            self.report({'ERROR'}, "No window manager available")
             return {'CANCELLED'}
 
-        original_mode = context.mode
-        was_in_edit = original_mode == 'EDIT_MESH'
+        if event.type != 'LEFTMOUSE':
+            return self.sample_at_cursor(context, event.mouse_x, event.mouse_y)
 
-        try:
-            if was_in_edit:
-                bpy.ops.object.mode_set(mode='OBJECT')
+        context.window_manager.modal_handler_add(self)
+        if context.workspace is not None:
+            context.workspace.status_text_set("Vertex Color Tool: left-click a mesh in the 3D View, or right-click/Esc to cancel")
+        return {'RUNNING_MODAL'}
 
-            apply_mode = context.scene.vertex_color_apply_mode
-
-            for obj in objects:
-                mesh = obj.data
-                color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
-                if color_attr is None or color_attr.domain != 'CORNER':
-                    continue
-
-                indices, selection_source = get_target_corner_indices(
-                    obj, mesh, apply_mode, original_mode
-                )
-                if not indices:
-                    continue
-
-                context.scene.vertex_color_value = color_attr.data[indices[0]].color
-                for area in context.screen.areas:
-                    if area.type == 'VIEW_3D':
-                        area.tag_redraw()
-                self.report(
-                    {'INFO'},
-                    f"Loaded color from selected {selection_source} on '{obj.name}'"
-                )
-                return {'FINISHED'}
-
-            self.report({'WARNING'}, "No painted Color data found on the current selection")
+    def modal(self, context, event):
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            self.finish(context)
             return {'CANCELLED'}
-        finally:
-            if was_in_edit:
-                bpy.ops.object.mode_set(mode='EDIT')
+
+        if event.type != 'LEFTMOUSE' or event.value != 'PRESS':
+            return {'PASS_THROUGH'}
+
+        result = self.sample_at_cursor(context, event.mouse_x, event.mouse_y)
+        self.finish(context)
+        return result
+
+    def finish(self, context):
+        if context.workspace is not None:
+            context.workspace.status_text_set(None)
+
+    def sample_at_cursor(self, context, mouse_x, mouse_y):
+        result, error_message = pick_color_with_raycast(context, mouse_x, mouse_y)
+        if result is None:
+            self.report({'WARNING'}, error_message)
+            return {'CANCELLED'}
+
+        source_obj, color_value = result
+        context.scene.vertex_color_value = color_value
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+        self.report({'INFO'}, f"Sampled color from '{source_obj.name}'")
+        return {'FINISHED'}
+
+
+def _has_selection_edit(context):
+    """Return True if anything is selected in the current edit-mode objects."""
+    vertex_sel, edge_sel, face_sel = context.tool_settings.mesh_select_mode
+    for obj in context.objects_in_mode_unique_data:
+        if obj.type != 'MESH':
+            continue
+        bm = bmesh.from_edit_mesh(obj.data)
+        if vertex_sel and any(v.select for v in bm.verts):
+            return True
+        if edge_sel and any(e.select for e in bm.edges):
+            return True
+        if face_sel and any(f.select for f in bm.faces):
+            return True
+    return False
+
+
+def _raycast_get_paint_targets(context, mouse_x, mouse_y):
+    """
+    Return [(obj, loop_indices)] for the geometry under the cursor, or (None, error_str).
+    Requires a face hit — no nearest-element fallback.
+    """
+    area, region, region_3d = find_view3d_window_region(context, mouse_x, mouse_y)
+    if region is None or region_3d is None:
+        return None, "Cursor must be inside a 3D Viewport"
+
+    coord = (mouse_x - region.x, mouse_y - region.y)
+    ray_origin = view3d_utils.region_2d_to_origin_3d(region, region_3d, coord)
+    ray_direction = view3d_utils.region_2d_to_vector_3d(region, region_3d, coord)
+
+    if context.mode == 'EDIT_MESH':
+        # Find the nearest face hit across all edit-mode objects
+        best = None  # (dist_sq, obj, face_index, location_local)
+        for obj in context.objects_in_mode_unique_data:
+            if obj.type != 'MESH':
+                continue
+            obj.update_from_editmode()
+            hit = _bvh_raycast(obj, ray_origin, ray_direction)
+            if hit and (best is None or hit[0] < best[0]):
+                best = (hit[0], obj, hit[1], hit[2])
+
+        if best is None:
+            return None, "No face under cursor"
+
+        _, obj, face_index, location_local = best
+        mesh = obj.data
+        polygon = mesh.polygons[face_index]
+        vertex_sel, edge_sel, face_sel = context.tool_settings.mesh_select_mode
+
+        if face_sel:
+            loop_indices = list(polygon.loop_indices)
+
+        elif vertex_sel:
+            nearest_vi = min(
+                polygon.vertices,
+                key=lambda vi: (mesh.vertices[vi].co - location_local).length_squared,
+            )
+            loop_indices = [l.index for l in mesh.loops if l.vertex_index == nearest_vi]
+
+        else:  # edge select
+            verts = list(polygon.vertices)
+            pairs = [(verts[i], verts[(i + 1) % len(verts)]) for i in range(len(verts))]
+            v0, v1 = min(
+                pairs,
+                key=lambda p: (
+                    (mesh.vertices[p[0]].co + mesh.vertices[p[1]].co) / 2 - location_local
+                ).length_squared,
+            )
+            edge_vis = {v0, v1}
+            loop_indices = [l.index for l in mesh.loops if l.vertex_index in edge_vis]
+
+        return [(obj, loop_indices)], None
+
+    else:  # Object mode
+        depsgraph = context.evaluated_depsgraph_get()
+        result, _, _, _, hit_obj, _ = context.scene.ray_cast(depsgraph, ray_origin, ray_direction)
+        if not result or hit_obj is None or hit_obj.type != 'MESH':
+            return None, "No mesh under cursor"
+        return [(hit_obj, list(range(len(hit_obj.data.loops))))], None
 
 
 class MESH_OT_assign_vertex_color(bpy.types.Operator):
@@ -232,9 +507,50 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
     bl_label = "Apply Color"
     bl_options = {'REGISTER', 'UNDO'}
 
+    mouse_x: bpy.props.IntProperty()
+    mouse_y: bpy.props.IntProperty()
+
+    def invoke(self, context, event):
+        self.mouse_x = event.mouse_x
+        self.mouse_y = event.mouse_y
+        return self.execute(context)
+
     def execute(self, context):
         original_mode = context.mode
         was_in_edit = original_mode == 'EDIT_MESH'
+
+        # Raycast-based paint when nothing is selected
+        use_raycast = (
+            (original_mode == 'OBJECT' and not context.selected_objects) or
+            (was_in_edit and not _has_selection_edit(context))
+        )
+        if use_raycast:
+            if not self.mouse_x and not self.mouse_y:
+                self.report({'WARNING'}, "Nothing selected")
+                return {'CANCELLED'}
+            targets, error = _raycast_get_paint_targets(context, self.mouse_x, self.mouse_y)
+            if targets is None:
+                self.report({'WARNING'}, error)
+                return {'CANCELLED'}
+            try:
+                if was_in_edit:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                color_value = context.scene.vertex_color_value
+                total = 0
+                for obj, loop_indices in targets:
+                    mesh = obj.data
+                    color_attr = resolve_color_attribute(mesh)
+                    idx = mesh.color_attributes.find(color_attr.name)
+                    mesh.color_attributes.active_color_index = idx
+                    mesh.color_attributes.render_color_index = idx
+                    paint_color_indices(color_attr, loop_indices, color_value)
+                    total += len(loop_indices)
+                    mesh.update()
+                self.report({'INFO'}, f"Painted {total} loops on '{targets[0][0].name}'")
+            finally:
+                if was_in_edit:
+                    bpy.ops.object.mode_set(mode='EDIT')
+            return {'FINISHED'}
 
         try:
             objects = target_mesh_objects(context)
@@ -247,20 +563,20 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
 
             color_value = context.scene.vertex_color_value
             apply_mode = context.scene.vertex_color_apply_mode
-            
+
             total_loops_affected = 0
-            
+
             for obj in objects:
                 mesh = obj.data
                 color_attr = resolve_color_attribute(mesh)
-                
+
                 # Set as active for UI/Renderer
                 idx = mesh.color_attributes.find(color_attr.name)
                 mesh.color_attributes.active_color_index = idx
                 mesh.color_attributes.render_color_index = idx
 
                 indices, _ = get_target_corner_indices(obj, mesh, apply_mode, original_mode)
-                
+
                 if not indices:
                     continue
 
