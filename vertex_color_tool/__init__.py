@@ -619,6 +619,124 @@ class VertexColorPaletteEntry(bpy.types.PropertyGroup):
     color: bpy.props.FloatVectorProperty(subtype='COLOR', size=4, min=0.0, max=1.0)
 
 
+# Global ref-count: color -> number of meshes using it
+# Per-mesh snapshot: mesh name -> set of colors last seen in that mesh
+_color_refcounts = {}
+_mesh_colors = {}
+_palette_initialized = False
+
+
+def _quantize_color(r, g, b, a):
+    return (round(r, 2), round(g, 2), round(b, 2), round(a, 2))
+
+
+def _collect_mesh_colors(mesh):
+    """Return the set of quantized colors in a mesh's Color attribute."""
+    color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+    if color_attr is None or color_attr.domain != 'CORNER' or len(color_attr.data) == 0:
+        return set()
+    n = len(color_attr.data)
+    colors = array('f', [0.0]) * (n * 4)
+    color_attr.data.foreach_get("color", colors)
+    q = _quantize_color
+    return {q(colors[i], colors[i+1], colors[i+2], colors[i+3]) for i in range(0, n * 4, 4)}
+
+
+def _collect_bmesh_colors(mesh):
+    """Return the set of quantized colors from BMesh (for edit-mode meshes)."""
+    bm = bmesh.from_edit_mesh(mesh)
+    color_layer = bm.loops.layers.float_color.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+    if color_layer is None:
+        color_layer = bm.loops.layers.color.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+    if color_layer is None:
+        return set()
+    q = _quantize_color
+    return {q(c[0], c[1], c[2], c[3])
+            for face in bm.faces for loop in face.loops for c in (loop[color_layer],)}
+
+
+def _write_palette(wm):
+    """Write live colors to the UI CollectionProperty, sorted by hue."""
+    palette = wm.vertex_color_palette
+    sorted_colors = sorted(
+        _color_refcounts,
+        key=lambda c: colorsys.rgb_to_hsv(c[0], c[1], c[2]),
+    )
+    palette.clear()
+    for color in sorted_colors:
+        entry = palette.add()
+        entry.color = color
+
+
+def _update_mesh(mesh_name, new_colors):
+    """Update ref-counts for a single mesh. Returns True if the palette changed."""
+    old_colors = _mesh_colors.get(mesh_name, set())
+    if len(old_colors) == len(new_colors) and old_colors == new_colors:
+        return False
+
+    added = new_colors - old_colors
+    removed = old_colors - new_colors
+
+    changed = False
+    for color in removed:
+        _color_refcounts[color] -= 1
+        if _color_refcounts[color] <= 0:
+            del _color_refcounts[color]
+            changed = True
+
+    for color in added:
+        if color not in _color_refcounts:
+            changed = True
+        _color_refcounts[color] = _color_refcounts.get(color, 0) + 1
+
+    _mesh_colors[mesh_name] = new_colors
+    return changed
+
+
+def _rebuild_palette(scene):
+    """Full scene scan — used when opening the palette or on file load."""
+    wm = bpy.context.window_manager
+    if not hasattr(wm, 'vertex_color_palette'):
+        return
+    _color_refcounts.clear()
+    _mesh_colors.clear()
+    for obj in scene.objects:
+        if obj.type != 'MESH':
+            continue
+        if obj.mode == 'EDIT':
+            colors = _collect_bmesh_colors(obj.data)
+        else:
+            colors = _collect_mesh_colors(obj.data)
+        _mesh_colors[obj.data.name] = colors
+        for color in colors:
+            _color_refcounts[color] = _color_refcounts.get(color, 0) + 1
+    _write_palette(wm)
+
+
+def _on_depsgraph_update(scene, depsgraph):
+    global _palette_initialized
+    wm = bpy.context.window_manager
+    if not hasattr(wm, 'vertex_color_palette'):
+        return
+    if not _palette_initialized:
+        _palette_initialized = True
+        _rebuild_palette(scene)
+        return
+    changed_mesh = None
+    for update in depsgraph.updates:
+        if isinstance(update.id, bpy.types.Mesh) and update.is_updated_geometry:
+            changed_mesh = update.id
+            break
+
+    if changed_mesh is not None:
+        # In edit mode, mesh color data is stale — read from BMesh instead
+        is_edit = (bpy.context.mode == 'EDIT_MESH'
+                   and any(obj.data == changed_mesh for obj in bpy.context.objects_in_mode_unique_data))
+        new_colors = _collect_bmesh_colors(changed_mesh) if is_edit else _collect_mesh_colors(changed_mesh)
+        if _update_mesh(changed_mesh.name, new_colors):
+            _write_palette(wm)
+
+
 class MESH_OT_select_palette_color(bpy.types.Operator):
     """Set this as the active color to paint with"""
     bl_idname = "mesh.select_palette_color"
@@ -635,41 +753,12 @@ class MESH_OT_select_palette_color(bpy.types.Operator):
 
 
 class MESH_OT_scene_color_palette(bpy.types.Operator):
-    """Collect all unique vertex colors from every mesh in the scene and display them as a palette to pick from"""
+    """Browse all unique vertex colors currently in the scene"""
     bl_idname = "mesh.scene_color_palette"
     bl_label = "Scene Palette"
 
     def invoke(self, context, event):
-        palette = context.window_manager.vertex_color_palette
-        palette.clear()
-
-        seen = set()
-        for obj in context.scene.objects:
-            if obj.type != 'MESH':
-                continue
-            mesh = obj.data
-            if obj.mode == 'EDIT':
-                obj.update_from_editmode()
-            color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
-            if color_attr is None or color_attr.domain != 'CORNER' or len(color_attr.data) == 0:
-                continue
-            colors = array('f', [0.0]) * (len(color_attr.data) * 4)
-            color_attr.data.foreach_get("color", colors)
-            for i in range(0, len(colors), 4):
-                key = (round(colors[i], 2), round(colors[i+1], 2),
-                       round(colors[i+2], 2), round(colors[i+3], 2))
-                if key not in seen:
-                    seen.add(key)
-
-        # Sort by hue then luminance
-        sorted_colors = sorted(seen, key=lambda c: (
-            colorsys.rgb_to_hsv(c[0], c[1], c[2])[0],
-            colorsys.rgb_to_hsv(c[0], c[1], c[2])[2],
-        ))
-        for color in sorted_colors:
-            entry = palette.add()
-            entry.color = color
-
+        _rebuild_palette(context.scene)
         return context.window_manager.invoke_popup(self, width=250)
 
     def draw(self, context):
@@ -718,6 +807,7 @@ def register():
         type=VertexColorPaletteEntry,
     )
     bpy.types.VIEW3D_HT_header.append(_draw_vertex_color_header)
+    bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
 
     bpy.types.Scene.vertex_color_apply_mode = bpy.props.EnumProperty(
         name="Apply Mode",
@@ -767,6 +857,11 @@ def unregister():
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
 
+    global _palette_initialized
+    _palette_initialized = False
+    _color_refcounts.clear()
+    _mesh_colors.clear()
+    bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
     bpy.types.VIEW3D_HT_header.remove(_draw_vertex_color_header)
     bpy.utils.unregister_class(MESH_OT_scene_color_palette)
     bpy.utils.unregister_class(MESH_OT_select_palette_color)
