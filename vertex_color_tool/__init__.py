@@ -12,43 +12,99 @@ from array import array
 import bpy
 
 DEFAULT_COLOR_ATTRIBUTE_NAMES = ("Color", "Attribute", "Col")
+CANONICAL_COLOR_ATTRIBUTE_NAME = "Color"
 
 
-def resolve_color_attribute(mesh, requested_name):
+def color_attr_sort_key(color_attr):
+    return (
+        color_attr.name != CANONICAL_COLOR_ATTRIBUTE_NAME,
+        color_attr.name not in DEFAULT_COLOR_ATTRIBUTE_NAMES,
+        color_attr.domain != 'CORNER',
+        color_attr.data_type != 'FLOAT_COLOR',
+        color_attr.name,
+    )
+
+
+def copy_point_attr_to_corner_attr(mesh, source_attr, target_attr):
+    point_colors = array('f', [0.0]) * (len(source_attr.data) * 4)
+    source_attr.data.foreach_get("color", point_colors)
+
+    corner_colors = array('f', [0.0]) * (len(target_attr.data) * 4)
+    for loop in mesh.loops:
+        source_base = loop.vertex_index * 4
+        target_base = loop.index * 4
+        corner_colors[target_base] = point_colors[source_base]
+        corner_colors[target_base + 1] = point_colors[source_base + 1]
+        corner_colors[target_base + 2] = point_colors[source_base + 2]
+        corner_colors[target_base + 3] = point_colors[source_base + 3]
+
+    target_attr.data.foreach_set("color", corner_colors)
+
+
+def copy_corner_attr_to_corner_attr(source_attr, target_attr):
+    if len(source_attr.data) != len(target_attr.data):
+        target_attr.data.foreach_set("color", [1.0, 1.0, 1.0, 1.0] * len(target_attr.data))
+        return
+
+    colors = array('f', [0.0]) * (len(source_attr.data) * 4)
+    source_attr.data.foreach_get("color", colors)
+    target_attr.data.foreach_set("color", colors)
+
+
+def pick_source_color_attribute(mesh):
+    active_attr = mesh.color_attributes.active_color
+    if active_attr is not None:
+        return active_attr
+
+    render_index = mesh.color_attributes.render_color_index
+    if render_index != -1:
+        return mesh.color_attributes[render_index]
+
+    color_attrs = list(mesh.color_attributes)
+    if not color_attrs:
+        return None
+
+    color_attrs.sort(key=color_attr_sort_key)
+    return color_attrs[0]
+
+
+def resolve_color_attribute(mesh):
     """
-    Finds or creates a compatible FLOAT_COLOR CORNER attribute.
-    Ensures existing non-compatible attributes are not overwritten/deleted.
+    Normalize the mesh to exactly one Color attribute in CORNER/FLOAT_COLOR form.
+    Reuses or migrates existing color data before removing conflicting attributes.
     """
-    attribute_name = requested_name or DEFAULT_COLOR_ATTRIBUTE_NAMES[0]
-    color_attr = mesh.color_attributes.get(attribute_name)
+    source_attr = pick_source_color_attribute(mesh)
+    color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
 
-    # 1. If it exists and matches our needs, use it
     if color_attr is not None and color_attr.domain == 'CORNER' and color_attr.data_type == 'FLOAT_COLOR':
-        return color_attr
+        target_attr = color_attr
+    else:
+        if color_attr is not None:
+            mesh.color_attributes.remove(color_attr)
+        target_attr = mesh.color_attributes.new(
+            name=CANONICAL_COLOR_ATTRIBUTE_NAME,
+            type='FLOAT_COLOR',
+            domain='CORNER',
+        )
+        target_attr.data.foreach_set("color", [1.0, 1.0, 1.0, 1.0] * len(target_attr.data))
 
-    # 2. If name is taken by a different domain/type, find a fallback or unique name
-    if color_attr is not None:
-        # Check fallbacks
-        for name in DEFAULT_COLOR_ATTRIBUTE_NAMES:
-            fallback = mesh.color_attributes.get(name)
-            if fallback and fallback.domain == 'CORNER' and fallback.data_type == 'FLOAT_COLOR':
-                return fallback
+        if source_attr is not None:
+            if source_attr.domain == 'CORNER':
+                copy_corner_attr_to_corner_attr(source_attr, target_attr)
+            elif source_attr.domain == 'POINT':
+                copy_point_attr_to_corner_attr(mesh, source_attr, target_attr)
 
-        # If still blocked, create a unique name to avoid deleting user data.
-        suffix = 1
-        base_name = f"{attribute_name}_VC"
-        attribute_name = base_name
-        while mesh.color_attributes.get(attribute_name) is not None:
-            suffix += 1
-            attribute_name = f"{base_name}_{suffix}"
+    removable_names = [
+        color_attr.name
+        for color_attr in mesh.color_attributes
+        if color_attr.name != CANONICAL_COLOR_ATTRIBUTE_NAME
+    ]
+    for attr_name in removable_names:
+        color_attr = mesh.color_attributes.get(attr_name)
+        if color_attr is not None:
+            mesh.color_attributes.remove(color_attr)
 
-    # 3. Create new attribute
-    new_attr = mesh.color_attributes.new(name=attribute_name, type='FLOAT_COLOR', domain='CORNER')
-    
-    # Initialize with white
-    new_attr.data.foreach_set("color", [1.0, 1.0, 1.0, 1.0] * len(new_attr.data))
-    
-    return new_attr
+    return target_attr
 
 
 def get_target_corner_indices(obj, mesh, apply_mode, original_mode):
@@ -139,14 +195,13 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='OBJECT')
 
             color_value = context.scene.vertex_color_value
-            attr_target_name = context.scene.vertex_color_attribute_name.strip()
             apply_mode = context.scene.vertex_color_apply_mode
             
             total_loops_affected = 0
             
             for obj in objects:
                 mesh = obj.data
-                color_attr = resolve_color_attribute(mesh, attr_target_name)
+                color_attr = resolve_color_attribute(mesh)
                 
                 # Set as active for UI/Renderer
                 idx = mesh.color_attributes.find(color_attr.name)
@@ -186,21 +241,16 @@ class MESH_PT_vertex_color_panel(bpy.types.Panel):
         layout = self.layout
         scn = context.scene
 
-        col = layout.column(align=True)
-        col.prop(scn, "vertex_color_apply_mode", text="Mode")
-        col.prop(scn, "vertex_color_attribute_name", text="Name")
-
-        layout.separator()
+        row = layout.row(align=True)
+        if scn.vertex_color_apply_mode == 'FACE':
+            row.label(text="", icon='FACESEL')
+        else:
+            row.label(text="", icon='VERTEXSEL')
+        row.prop(scn, "vertex_color_apply_mode", text="")
         
         row = layout.row()
         row.label(text="Color:")
         row.prop(scn, "vertex_color_value", text="")
-
-        box = layout.box()
-        if scn.vertex_color_apply_mode == 'FACE':
-            box.label(text="Mode: Face Corner (Sharp)", icon='FACESEL')
-        else:
-            box.label(text="Mode: Vertex Style (Smooth)", icon='VERTEXSEL')
 
         layout.operator("mesh.assign_vertex_color", text="Apply to Selection", icon='CHECKMARK')
 
@@ -212,14 +262,10 @@ def register():
     bpy.types.Scene.vertex_color_apply_mode = bpy.props.EnumProperty(
         name="Apply Mode",
         items=[
-            ('VERTEX', "Vertex Style", "Color all loops sharing selected vertices"),
-            ('FACE', "Face Corner", "Color only loops within selected faces"),
+            ('VERTEX', "Vertex Style (Smooth)", "Color all loops sharing selected vertices"),
+            ('FACE', "Face Corner (Sharp)", "Color only loops within selected faces"),
         ],
         default='VERTEX',
-    )
-    bpy.types.Scene.vertex_color_attribute_name = bpy.props.StringProperty(
-        name="Attribute Name",
-        default="Color",
     )
     bpy.types.Scene.vertex_color_value = bpy.props.FloatVectorProperty(
         name="Vertex Color",
@@ -235,7 +281,6 @@ def unregister():
     bpy.utils.unregister_class(MESH_OT_assign_vertex_color)
     bpy.utils.unregister_class(MESH_PT_vertex_color_panel)
     del bpy.types.Scene.vertex_color_apply_mode
-    del bpy.types.Scene.vertex_color_attribute_name
     del bpy.types.Scene.vertex_color_value
 
 
