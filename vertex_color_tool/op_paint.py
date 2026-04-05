@@ -6,63 +6,11 @@ from .color_attr import (
     paint_color_indices,
     resolve_color_attribute,
 )
-from .raycast import get_paint_targets, pick_color
+from .raycast import get_paint_targets
 
-
-class MESH_OT_pick_vertex_color(bpy.types.Operator):
-    """Sample a vertex color from the mesh under the cursor. Hold the key to continuously sample while moving the mouse"""
-    bl_idname = "mesh.pick_vertex_color"
-    bl_label = "Eyedropper"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        self.report({'INFO'}, "Use the shortcut or click in the 3D Viewport to sample a vertex color")
-        return {'CANCELLED'}
-
-    def invoke(self, context, event):
-        if context.window_manager is None:
-            self.report({'ERROR'}, "No window manager available")
-            return {'CANCELLED'}
-
-        self._trigger_key = event.type
-        self._sample(context, event.mouse_x, event.mouse_y)
-        context.window_manager.modal_handler_add(self)
-        return {'RUNNING_MODAL'}
-
-    def modal(self, context, event):
-        if event.type in {'RIGHTMOUSE', 'ESC'}:
-            self._finish(context)
-            return {'CANCELLED'}
-
-        if event.type == self._trigger_key and event.value == 'RELEASE':
-            self._finish(context)
-            return {'FINISHED'}
-
-        if event.type == 'MOUSEMOVE':
-            self._sample(context, event.mouse_x, event.mouse_y)
-
-        return {'RUNNING_MODAL'}
-
-    def _finish(self, context):
-        if context.workspace is not None:
-            context.workspace.status_text_set(None)
-
-    def _sample(self, context, mouse_x, mouse_y):
-        result, _ = pick_color(context, mouse_x, mouse_y)
-        if result is None:
-            return
-        _, color_value = result
-        context.scene.vertex_color_value = color_value
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-
-
-# ---------------------------------------------------------------------------
-# Helpers for the assign operator
-# ---------------------------------------------------------------------------
 
 def _has_selection_edit(context):
+    """Return True if anything is selected in the current edit-mode objects."""
     vertex_sel, edge_sel, face_sel = context.tool_settings.mesh_select_mode
     for obj in context.objects_in_mode_unique_data:
         if obj.type != 'MESH':
@@ -78,6 +26,7 @@ def _has_selection_edit(context):
 
 
 def _target_mesh_objects(context):
+    """Return the mesh objects that should be painted."""
     if context.mode == 'EDIT_MESH':
         return [obj for obj in context.objects_in_mode_unique_data if obj.type == 'MESH']
     seen = set()
@@ -112,10 +61,6 @@ def _apply_to_targets(targets, color_value, was_in_edit):
         if was_in_edit:
             bpy.ops.object.mode_set(mode='EDIT')
 
-
-# ---------------------------------------------------------------------------
-# Assign operator
-# ---------------------------------------------------------------------------
 
 class MESH_OT_assign_vertex_color(bpy.types.Operator):
     """Paint the active color onto selected geometry. With nothing selected, paints the face under the cursor instead"""
@@ -166,8 +111,6 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
             return self._execute_raycast(context, was_in_edit)
 
         return self._execute_selection(context, original_mode, was_in_edit)
-
-    # -- internal ------------------------------------------------------------
 
     def _paint_raycast(self, context):
         was_in_edit = context.mode == 'EDIT_MESH'

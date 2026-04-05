@@ -11,7 +11,8 @@ bl_info = {
 
 import bpy
 
-from .operators import MESH_OT_assign_vertex_color, MESH_OT_pick_vertex_color
+from .op_eyedropper import MESH_OT_pick_vertex_color
+from .op_paint import MESH_OT_assign_vertex_color
 from .palette import (
     MESH_OT_scene_color_palette,
     MESH_OT_select_palette_color,
