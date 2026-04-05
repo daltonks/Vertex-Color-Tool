@@ -93,7 +93,6 @@ class MESH_OT_scene_color_palette(bpy.types.Operator):
         grid = layout.grid_flow(columns=5, even_columns=True, align=True)
         for i, entry in enumerate(palette):
             col = grid.column(align=True)
-            col.enabled = False
             col.prop(entry, "color", text="")
             col = grid.column(align=True)
             row = col.row(align=True)
