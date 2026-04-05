@@ -510,10 +510,60 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
     mouse_x: bpy.props.IntProperty()
     mouse_y: bpy.props.IntProperty()
 
+    def _paint_raycast(self, context):
+        """Paint at current mouse position via raycast, respecting current mode."""
+        was_in_edit = context.mode == 'EDIT_MESH'
+        targets, _ = _raycast_get_paint_targets(context, self.mouse_x, self.mouse_y)
+        if targets is None:
+            return
+        try:
+            if was_in_edit:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            color_value = context.scene.vertex_color_value
+            for obj, loop_indices in targets:
+                mesh = obj.data
+                color_attr = resolve_color_attribute(mesh)
+                idx = mesh.color_attributes.find(color_attr.name)
+                mesh.color_attributes.active_color_index = idx
+                mesh.color_attributes.render_color_index = idx
+                paint_color_indices(color_attr, loop_indices, color_value)
+                mesh.update()
+        finally:
+            if was_in_edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+
     def invoke(self, context, event):
         self.mouse_x = event.mouse_x
         self.mouse_y = event.mouse_y
+
+        original_mode = context.mode
+        was_in_edit = original_mode == 'EDIT_MESH'
+
+        use_raycast = (
+            (original_mode == 'OBJECT' and not context.selected_objects) or
+            (was_in_edit and not _has_selection_edit(context))
+        )
+
+        if use_raycast:
+            self._paint_raycast(context)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+
         return self.execute(context)
+
+    def modal(self, context, event):
+        if event.type == 'V' and event.value == 'RELEASE':
+            return {'FINISHED'}
+
+        if event.type == 'ESC':
+            return {'CANCELLED'}
+
+        if event.type == 'MOUSEMOVE':
+            self.mouse_x = event.mouse_x
+            self.mouse_y = event.mouse_y
+            self._paint_raycast(context)
+
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         original_mode = context.mode
