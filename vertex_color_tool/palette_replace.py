@@ -11,20 +11,12 @@ from . import palette_state as state
 
 def replace_color_in_meshes(old_color, new_color):
     """Replace all corners matching old_color with new_color across all meshes."""
-    mesh_names = state.meshes_using_color(old_color)
-    if not mesh_names:
-        return
-
     state.suppressing_updates = True
     try:
         nr, ng, nb, na = new_color
         q = state.quantize
 
-        for mesh_name in mesh_names:
-            mesh = bpy.data.meshes.get(mesh_name)
-            if mesh is None:
-                continue
-
+        for mesh in bpy.data.meshes:
             is_edit = any(obj.mode == 'EDIT' for obj in bpy.data.objects
                           if obj.type == 'MESH' and obj.data == mesh)
 
@@ -33,7 +25,10 @@ def replace_color_in_meshes(old_color, new_color):
             else:
                 _replace_mesh(mesh, old_color, nr, ng, nb, na, q)
 
-        state.update_bookkeeping(mesh_names, old_color, q(nr, ng, nb, na))
+        # Update palette: remove old, add new
+        new_q = q(nr, ng, nb, na)
+        state.remove_color(old_color)
+        state.add_colors({new_q})
     finally:
         state.suppressing_updates = False
 

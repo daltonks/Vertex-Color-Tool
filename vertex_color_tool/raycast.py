@@ -21,20 +21,38 @@ def find_view3d_region(context, mouse_x, mouse_y):
     return None, None, None
 
 
-def bvh_raycast(obj, ray_origin, ray_direction, mesh=None):
+def _get_cached_bvh(mesh, cache):
+    """Look up or build a BVH for a mesh, using cache if provided."""
+    if cache is None:
+        return build_bvh(mesh)
+    key = mesh.as_pointer()
+    if key not in cache:
+        cache[key] = build_bvh(mesh)
+    return cache[key]
+
+
+def build_bvh(mesh):
+    """Build a BVH tree from a mesh. Cache-friendly — call once and reuse."""
+    if not mesh.polygons or not mesh.vertices:
+        return None
+    return BVHTree.FromPolygons(
+        [v.co.copy() for v in mesh.vertices],
+        [tuple(p.vertices) for p in mesh.polygons],
+    )
+
+
+def bvh_raycast(obj, ray_origin, ray_direction, mesh=None, bvh=None):
     """Ray-cast against an object via BVH. Returns (dist_sq, face_index, location_local) or None."""
     if mesh is None:
         mesh = obj.data
-    if not mesh.polygons or not mesh.vertices:
+    if bvh is None:
+        bvh = build_bvh(mesh)
+    if bvh is None:
         return None
     mat = obj.matrix_world
     mat_inv = mat.inverted()
     origin = mat_inv @ ray_origin
     direction = (mat_inv.to_3x3() @ ray_direction).normalized()
-    bvh = BVHTree.FromPolygons(
-        [v.co.copy() for v in mesh.vertices],
-        [tuple(p.vertices) for p in mesh.polygons],
-    )
     loc, _, face_index, _ = bvh.ray_cast(origin, direction)
     if loc is None or face_index is None or face_index < 0:
         return None
@@ -78,10 +96,11 @@ def _sample_color_bmesh(obj, face_index, hit_local):
     return (c[0], c[1], c[2], c[3])
 
 
-def pick_color(context, mouse_x, mouse_y):
+def pick_color(context, mouse_x, mouse_y, bvh_cache=None):
     """Sample a vertex color under the cursor.
 
     Returns ((obj, color_tuple), None) on success, or (None, error_string) on failure.
+    bvh_cache is an optional dict (mesh_ptr -> BVHTree) reused across calls.
     """
     area, region, region_3d = find_view3d_region(context, mouse_x, mouse_y)
     if region is None or region_3d is None:
@@ -100,7 +119,8 @@ def pick_color(context, mouse_x, mouse_y):
                 continue
             obj.update_from_editmode()
 
-            hit = bvh_raycast(obj, ray_origin, ray_direction)
+            bvh = _get_cached_bvh(obj.data, bvh_cache)
+            hit = bvh_raycast(obj, ray_origin, ray_direction, bvh=bvh)
             if hit is not None:
                 dist_sq, face_index, loc = hit
                 if best_hit is None or dist_sq < best_hit[0]:
@@ -109,7 +129,8 @@ def pick_color(context, mouse_x, mouse_y):
             eval_obj = obj.evaluated_get(depsgraph)
             eval_mesh = eval_obj.to_mesh()
             if eval_mesh is not None and len(eval_mesh.polygons) > len(obj.data.polygons):
-                hit = bvh_raycast(obj, ray_origin, ray_direction, mesh=eval_mesh)
+                eval_bvh = _get_cached_bvh(eval_mesh, bvh_cache)
+                hit = bvh_raycast(obj, ray_origin, ray_direction, mesh=eval_mesh, bvh=eval_bvh)
                 if hit is not None:
                     dist_sq, face_index, loc = hit
                     if best_hit is None or dist_sq < best_hit[0]:
@@ -141,7 +162,7 @@ def pick_color(context, mouse_x, mouse_y):
     return None, "No painted mesh under cursor"
 
 
-def get_paint_targets(context, mouse_x, mouse_y):
+def get_paint_targets(context, mouse_x, mouse_y, bvh_cache=None):
     """Return [(obj, loop_indices)] for geometry under the cursor, or (None, error_string)."""
     area, region, region_3d = find_view3d_region(context, mouse_x, mouse_y)
     if region is None or region_3d is None:
@@ -157,7 +178,8 @@ def get_paint_targets(context, mouse_x, mouse_y):
             if obj.type != 'MESH':
                 continue
             obj.update_from_editmode()
-            hit = bvh_raycast(obj, ray_origin, ray_direction)
+            bvh = _get_cached_bvh(obj.data, bvh_cache)
+            hit = bvh_raycast(obj, ray_origin, ray_direction, bvh=bvh)
             if hit and (best is None or hit[0] < best[0]):
                 best = (hit[0], obj, hit[1], hit[2])
 

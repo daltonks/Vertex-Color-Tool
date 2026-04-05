@@ -19,6 +19,7 @@ class MESH_OT_pick_vertex_color(bpy.types.Operator):
             return {'CANCELLED'}
 
         self._trigger_key = event.type
+        self._bvh_cache = {}
         self._sample(context, event.mouse_x, event.mouse_y)
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
@@ -38,11 +39,12 @@ class MESH_OT_pick_vertex_color(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def _finish(self, context):
+        self._bvh_cache = None
         if context.workspace is not None:
             context.workspace.status_text_set(None)
 
     def _sample(self, context, mouse_x, mouse_y):
-        result, _ = pick_color(context, mouse_x, mouse_y)
+        result, _ = pick_color(context, mouse_x, mouse_y, bvh_cache=self._bvh_cache)
         if result is None:
             return
         _, color_value = result

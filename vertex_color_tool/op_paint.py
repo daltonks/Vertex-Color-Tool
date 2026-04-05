@@ -6,6 +6,7 @@ from .color_attr import (
     paint_color_indices,
     resolve_color_attribute,
 )
+from . import palette_state
 from .raycast import get_paint_targets
 
 
@@ -56,6 +57,7 @@ def _apply_to_targets(targets, color_value, was_in_edit):
             paint_color_indices(color_attr, loop_indices, color_value)
             total += len(loop_indices)
             mesh.update()
+        palette_state.add_colors({palette_state.quantize(*color_value)})
         return total
     finally:
         if was_in_edit:
@@ -82,6 +84,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
         )
 
         if use_raycast:
+            self._bvh_cache = {}
             self._paint_raycast(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
@@ -90,8 +93,10 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type == 'V' and event.value == 'RELEASE':
+            self._bvh_cache = None
             return {'FINISHED'}
         if event.type == 'ESC':
+            self._bvh_cache = None
             return {'CANCELLED'}
         if event.type == 'MOUSEMOVE':
             self.mouse_x = event.mouse_x
@@ -114,7 +119,8 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
 
     def _paint_raycast(self, context):
         was_in_edit = context.mode == 'EDIT_MESH'
-        targets, _ = get_paint_targets(context, self.mouse_x, self.mouse_y)
+        cache = getattr(self, '_bvh_cache', None)
+        targets, _ = get_paint_targets(context, self.mouse_x, self.mouse_y, bvh_cache=cache)
         if targets is not None:
             _apply_to_targets(targets, context.scene.vertex_color_value, was_in_edit)
 
@@ -175,6 +181,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
             if total == 0:
                 self.report({'WARNING'}, "No geometry selected to paint")
             else:
+                palette_state.add_colors({palette_state.quantize(*color_value)})
                 self.report({'INFO'}, f"Painted {total} corner(s) across {len(objects)} object(s)")
 
         finally:
