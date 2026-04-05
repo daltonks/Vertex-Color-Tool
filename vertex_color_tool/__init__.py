@@ -207,9 +207,10 @@ def find_view3d_window_region(context, mouse_x, mouse_y):
     return None, None, None
 
 
-def _bvh_raycast(obj, ray_origin, ray_direction):
-    """Ray cast against an edit-mode object using a BVH tree. Returns (dist_sq, face_index, location_local) or None."""
-    mesh = obj.data
+def _bvh_raycast(obj, ray_origin, ray_direction, mesh=None):
+    """Ray cast against an object using a BVH tree. Returns (dist_sq, face_index, location_local) or None."""
+    if mesh is None:
+        mesh = obj.data
     if not mesh.polygons or not mesh.vertices:
         return None
     matrix_world = obj.matrix_world
@@ -264,9 +265,10 @@ def _sample_closest_loop_color_bmesh(obj, face_index, hit_local):
     return (c[0], c[1], c[2], c[3])
 
 
-def _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction):
+def _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction, mesh=None):
     """Find the vertex whose world-space position is closest to the ray. Returns (color, dist_sq) or (None, inf)."""
-    mesh = obj.data
+    if mesh is None:
+        mesh = obj.data
     matrix_world = obj.matrix_world
     matrix_inv = matrix_world.inverted()
     origin_local = matrix_inv @ ray_origin
@@ -313,7 +315,7 @@ def pick_color_with_raycast(context, mouse_x, mouse_y):
     ray_direction = view3d_utils.region_2d_to_vector_3d(region, region_3d, coord)
 
     depsgraph = context.evaluated_depsgraph_get()
-    best_hit = None  # (dist_sq, obj, mesh, face_index, location_local)
+    best_hit = None  # (dist_sq, obj, mesh, face_index, location_local, from_eval)
 
     # Edit-mode objects: scene.ray_cast skips them, so use BVH
     if context.mode == 'EDIT_MESH':
@@ -321,12 +323,22 @@ def pick_color_with_raycast(context, mouse_x, mouse_y):
             if obj.type != 'MESH':
                 continue
             obj.update_from_editmode()
+            # Try the base mesh (accurate BMesh color sampling)
             hit = _bvh_raycast(obj, ray_origin, ray_direction)
-            if hit is None:
-                continue
-            dist_sq, face_index, location_local = hit
-            if best_hit is None or dist_sq < best_hit[0]:
-                best_hit = (dist_sq, obj, obj.data, face_index, location_local)
+            if hit is not None:
+                dist_sq, face_index, location_local = hit
+                if best_hit is None or dist_sq < best_hit[0]:
+                    best_hit = (dist_sq, obj, obj.data, face_index, location_local, False)
+
+            # Also try the evaluated mesh (modifier-generated geometry like mirror/array)
+            eval_obj = obj.evaluated_get(depsgraph)
+            eval_mesh = eval_obj.to_mesh()
+            if eval_mesh is not None and len(eval_mesh.polygons) > len(obj.data.polygons):
+                hit = _bvh_raycast(obj, ray_origin, ray_direction, mesh=eval_mesh)
+                if hit is not None:
+                    dist_sq, face_index, location_local = hit
+                    if best_hit is None or dist_sq < best_hit[0]:
+                        best_hit = (dist_sq, obj, eval_mesh, face_index, location_local, True)
 
     # All other visible objects
     result, location, _, face_index, hit_obj, matrix = context.scene.ray_cast(depsgraph, ray_origin, ray_direction)
@@ -334,11 +346,12 @@ def pick_color_with_raycast(context, mouse_x, mouse_y):
         dist_sq = (location - ray_origin).length_squared
         if best_hit is None or dist_sq < best_hit[0]:
             location_local = matrix.inverted() @ location
-            best_hit = (dist_sq, hit_obj, hit_obj.data, face_index, location_local)
+            eval_obj = hit_obj.evaluated_get(depsgraph)
+            best_hit = (dist_sq, hit_obj, eval_obj.data, face_index, location_local, False)
 
     if best_hit is not None:
-        _, obj, mesh, face_index, location_local = best_hit
-        if obj.mode == 'EDIT':
+        _, obj, mesh, face_index, location_local, from_eval = best_hit
+        if obj.mode == 'EDIT' and not from_eval:
             color = _sample_closest_loop_color_bmesh(obj, face_index, location_local)
         else:
             color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
@@ -354,22 +367,27 @@ def pick_color_with_raycast(context, mouse_x, mouse_y):
     best_color = None
     best_dist_sq = float('inf')
 
-    candidates = []
+    candidates = []  # (obj, mesh) — mesh may be evaluated
     edit_ptrs = set()
     if context.mode == 'EDIT_MESH':
         for obj in context.objects_in_mode_unique_data:
             if obj.type == 'MESH':
                 edit_ptrs.add(obj.as_pointer())
-                candidates.append(obj)
+                candidates.append((obj, obj.data))
+                # Also add evaluated mesh for modifier-generated vertices
+                eval_obj = obj.evaluated_get(depsgraph)
+                eval_mesh = eval_obj.to_mesh()
+                if eval_mesh is not None and len(eval_mesh.vertices) > len(obj.data.vertices):
+                    candidates.append((obj, eval_mesh))
     for obj in context.visible_objects:
         if obj.type == 'MESH' and obj.as_pointer() not in edit_ptrs:
-            candidates.append(obj)
+            candidates.append((obj, obj.data))
 
-    for obj in candidates:
-        color_attr = obj.data.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+    for obj, mesh in candidates:
+        color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
         if color_attr is None or color_attr.domain != 'CORNER' or len(color_attr.data) == 0:
             continue
-        color, dist_sq = _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction)
+        color, dist_sq = _nearest_vertex_color(obj, color_attr, ray_origin, ray_direction, mesh=mesh)
         if color is not None and dist_sq < best_dist_sq:
             best_dist_sq = dist_sq
             best_color = color
