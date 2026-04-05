@@ -13,10 +13,12 @@ import bpy
 
 from .op_eyedropper import MESH_OT_pick_vertex_color
 from .op_paint import MESH_OT_assign_vertex_color
-from .palette import (
+from .palette_ops import (
     MESH_OT_scene_color_palette,
     MESH_OT_select_palette_color,
     VertexColorPaletteEntry,
+)
+from .palette_state import (
     on_depsgraph_update,
     reset as reset_palette,
 )
