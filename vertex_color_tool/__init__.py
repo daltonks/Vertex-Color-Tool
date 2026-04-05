@@ -4,10 +4,11 @@ bl_info = {
     "category": "Mesh",
     "version": (1, 4, 0),
     "author": "BobHop & Dalton Spillman",
-    "description": "Apply RGBA color to selected vertices and faces"
+    "description": "Paint vertex colors on meshes in edit and object mode, with eyedropper sampling, scene palette, and per-vertex or per-face application"
 }
 
 from array import array
+import colorsys
 import sys
 
 import bpy
@@ -269,7 +270,7 @@ def _sample_closest_loop_color_bmesh(obj, face_index, hit_local):
 def pick_color_with_raycast(context, mouse_x, mouse_y):
     area, region, region_3d = find_view3d_window_region(context, mouse_x, mouse_y)
     if region is None or region_3d is None:
-        return None, "Click inside a 3D Viewport"
+        return None, "Cursor is not inside a 3D Viewport"
 
     coord = (mouse_x - region.x, mouse_y - region.y)
     ray_origin = view3d_utils.region_2d_to_origin_3d(region, region_3d, coord)
@@ -321,19 +322,19 @@ def pick_color_with_raycast(context, mouse_x, mouse_y):
                 color = _sample_closest_loop_color(mesh, color_attr, face_index, location_local)
         if color is not None:
             return (obj, color), None
-        return None, f"'{obj.name}' has no painted Color attribute"
+        return None, f"'{obj.name}' has no vertex colors to sample"
 
-    return None, "No mesh with vertex colors found under cursor"
+    return None, "No painted mesh under cursor"
 
 
 class MESH_OT_pick_vertex_color(bpy.types.Operator):
-    """Sample the stored Color attribute under the cursor"""
+    """Sample a vertex color from the mesh under the cursor. Hold the key to continuously sample while moving the mouse"""
     bl_idname = "mesh.pick_vertex_color"
-    bl_label = "Pick Vertex Color"
+    bl_label = "Eyedropper"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        self.report({'INFO'}, "Run this from a 3D View and click a mesh to sample its color")
+        self.report({'INFO'}, "Use the shortcut or click in the 3D Viewport to sample a vertex color")
         return {'CANCELLED'}
 
     def invoke(self, context, event):
@@ -399,7 +400,7 @@ def _raycast_get_paint_targets(context, mouse_x, mouse_y):
     """
     area, region, region_3d = find_view3d_window_region(context, mouse_x, mouse_y)
     if region is None or region_3d is None:
-        return None, "Cursor must be inside a 3D Viewport"
+        return None, "Cursor is not inside a 3D Viewport"
 
     coord = (mouse_x - region.x, mouse_y - region.y)
     ray_origin = view3d_utils.region_2d_to_origin_3d(region, region_3d, coord)
@@ -417,7 +418,7 @@ def _raycast_get_paint_targets(context, mouse_x, mouse_y):
                 best = (hit[0], obj, hit[1], hit[2])
 
         if best is None:
-            return None, "No face under cursor"
+            return None, "No mesh face under cursor"
 
         _, obj, face_index, location_local = best
         mesh = obj.data
@@ -452,14 +453,14 @@ def _raycast_get_paint_targets(context, mouse_x, mouse_y):
         depsgraph = context.evaluated_depsgraph_get()
         result, _, _, _, hit_obj, _ = context.scene.ray_cast(depsgraph, ray_origin, ray_direction)
         if not result or hit_obj is None or hit_obj.type != 'MESH':
-            return None, "No mesh under cursor"
+            return None, "No mesh face under cursor"
         return [(hit_obj, list(range(len(hit_obj.data.loops))))], None
 
 
 class MESH_OT_assign_vertex_color(bpy.types.Operator):
-    """Apply an RGBA color to selected geometry"""
+    """Paint the active color onto selected geometry. With nothing selected, paints the face under the cursor instead"""
     bl_idname = "mesh.assign_vertex_color"
-    bl_label = "Apply Color"
+    bl_label = "Paint Selection"
     bl_options = {'REGISTER', 'UNDO'}
 
     mouse_x: bpy.props.IntProperty()
@@ -531,7 +532,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
         )
         if use_raycast:
             if not self.mouse_x and not self.mouse_y:
-                self.report({'WARNING'}, "Nothing selected")
+                self.report({'WARNING'}, "Nothing selected to paint")
                 return {'CANCELLED'}
             targets, error = _raycast_get_paint_targets(context, self.mouse_x, self.mouse_y)
             if targets is None:
@@ -551,7 +552,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
                     paint_color_indices(color_attr, loop_indices, color_value)
                     total += len(loop_indices)
                     mesh.update()
-                self.report({'INFO'}, f"Painted {total} loops on '{targets[0][0].name}'")
+                self.report({'INFO'}, f"Painted {total} corner(s) on '{targets[0][0].name}'")
             finally:
                 if was_in_edit:
                     bpy.ops.object.mode_set(mode='EDIT')
@@ -560,7 +561,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
         try:
             objects = target_mesh_objects(context)
             if not objects:
-                self.report({'ERROR'}, "No selected mesh objects")
+                self.report({'WARNING'}, "No mesh objects selected")
                 return {'CANCELLED'}
 
             color_value = context.scene.vertex_color_value
@@ -602,9 +603,9 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
                 mesh.update()
 
             if total_loops_affected == 0:
-                self.report({'WARNING'}, "No geometry selected to color")
+                self.report({'WARNING'}, "No geometry selected to paint")
             else:
-                self.report({'INFO'}, f"Colored {total_loops_affected} loops across {len(objects)} object(s)")
+                self.report({'INFO'}, f"Painted {total_loops_affected} corner(s) across {len(objects)} object(s)")
 
         finally:
             # Always return to the mode the user started in
@@ -614,50 +615,126 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class MESH_PT_vertex_color_panel(bpy.types.Panel):
-    bl_label = "Vertex Color Tool"
-    bl_idname = "MESH_PT_vertex_color"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Tool'
+class VertexColorPaletteEntry(bpy.types.PropertyGroup):
+    color: bpy.props.FloatVectorProperty(subtype='COLOR', size=4, min=0.0, max=1.0)
+
+
+class MESH_OT_select_palette_color(bpy.types.Operator):
+    """Set this as the active color to paint with"""
+    bl_idname = "mesh.select_palette_color"
+    bl_label = "Use Color"
+    bl_options = {'INTERNAL'}
+
+    index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        palette = context.window_manager.vertex_color_palette
+        if 0 <= self.index < len(palette):
+            context.scene.vertex_color_value = palette[self.index].color
+        return {'FINISHED'}
+
+
+class MESH_OT_scene_color_palette(bpy.types.Operator):
+    """Collect all unique vertex colors from every mesh in the scene and display them as a palette to pick from"""
+    bl_idname = "mesh.scene_color_palette"
+    bl_label = "Scene Palette"
+
+    def invoke(self, context, event):
+        palette = context.window_manager.vertex_color_palette
+        palette.clear()
+
+        seen = set()
+        for obj in context.scene.objects:
+            if obj.type != 'MESH':
+                continue
+            mesh = obj.data
+            if obj.mode == 'EDIT':
+                obj.update_from_editmode()
+            color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+            if color_attr is None or color_attr.domain != 'CORNER' or len(color_attr.data) == 0:
+                continue
+            colors = array('f', [0.0]) * (len(color_attr.data) * 4)
+            color_attr.data.foreach_get("color", colors)
+            for i in range(0, len(colors), 4):
+                key = (round(colors[i], 2), round(colors[i+1], 2),
+                       round(colors[i+2], 2), round(colors[i+3], 2))
+                if key not in seen:
+                    seen.add(key)
+
+        # Sort by hue then luminance
+        sorted_colors = sorted(seen, key=lambda c: (
+            colorsys.rgb_to_hsv(c[0], c[1], c[2])[0],
+            colorsys.rgb_to_hsv(c[0], c[1], c[2])[2],
+        ))
+        for color in sorted_colors:
+            entry = palette.add()
+            entry.color = color
+
+        return context.window_manager.invoke_popup(self, width=250)
 
     def draw(self, context):
         layout = self.layout
-        scn = context.scene
+        palette = context.window_manager.vertex_color_palette
 
-        row = layout.row(align=True)
-        if scn.vertex_color_apply_mode == 'FACE':
-            row.label(text="", icon='FACESEL')
-        else:
-            row.label(text="", icon='VERTEXSEL')
-        row.prop(scn, "vertex_color_apply_mode", text="")
-        
-        row = layout.row()
-        row.label(text="Color:")
-        row.prop(scn, "vertex_color_value", text="")
-        row.operator("mesh.pick_vertex_color", text="", icon='EYEDROPPER')
+        if not palette:
+            layout.label(text="No painted meshes found in this scene")
+            return
 
-        layout.operator("mesh.assign_vertex_color", text="Apply to Selection", icon='CHECKMARK')
+        grid = layout.grid_flow(columns=5, even_columns=True, align=True)
+        for i, entry in enumerate(palette):
+            col = grid.column(align=True)
+            col.prop(entry, "color", text="")
+            op = col.operator("mesh.select_palette_color", text="Use")
+            op.index = i
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+
+def _draw_vertex_color_header(self, context):
+    layout = self.layout
+    scn = context.scene
+
+    row = layout.row(align=True)
+    row.separator()
+    mode_icon = 'FACESEL' if scn.vertex_color_apply_mode == 'FACE' else 'VERTEXSEL'
+    row.prop(scn, "vertex_color_apply_mode", text="", icon=mode_icon)
+    row.prop(scn, "vertex_color_value", text="")
+    row.operator("mesh.pick_vertex_color", text="", icon='EYEDROPPER')
+    row.operator("mesh.scene_color_palette", text="", icon='COLOR')
+    row.operator("mesh.assign_vertex_color", text="", icon='CHECKMARK')
 
 
 addon_keymaps = []
 
 
 def register():
+    bpy.utils.register_class(VertexColorPaletteEntry)
     bpy.utils.register_class(MESH_OT_pick_vertex_color)
     bpy.utils.register_class(MESH_OT_assign_vertex_color)
-    bpy.utils.register_class(MESH_PT_vertex_color_panel)
+    bpy.utils.register_class(MESH_OT_select_palette_color)
+    bpy.utils.register_class(MESH_OT_scene_color_palette)
+    bpy.types.WindowManager.vertex_color_palette = bpy.props.CollectionProperty(
+        type=VertexColorPaletteEntry,
+    )
+    bpy.types.VIEW3D_HT_header.append(_draw_vertex_color_header)
 
     bpy.types.Scene.vertex_color_apply_mode = bpy.props.EnumProperty(
         name="Apply Mode",
+        description="How color is applied to geometry",
         items=[
-            ('VERTEX', "Vertex Style (Smooth)", "Color all loops sharing selected vertices"),
-            ('FACE', "Face Corner (Sharp)", "Color only loops within selected faces"),
+            ('VERTEX', "Vertex Style",
+             "Color blends smoothly across faces sharing a vertex. "
+             "Select vertices or edges to paint them"),
+            ('FACE', "Face Corner",
+             "Color is applied per face corner, creating sharp boundaries between faces. "
+             "Select whole faces for sharp fills, or individual vertices/edges for partial painting"),
         ],
         default='VERTEX',
     )
     bpy.types.Scene.vertex_color_value = bpy.props.FloatVectorProperty(
-        name="Vertex Color",
+        name="Color",
+        description="The color to paint onto selected geometry",
         subtype='COLOR',
         size=4,
         min=0.0,
@@ -690,9 +767,13 @@ def unregister():
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
 
+    bpy.types.VIEW3D_HT_header.remove(_draw_vertex_color_header)
+    bpy.utils.unregister_class(MESH_OT_scene_color_palette)
+    bpy.utils.unregister_class(MESH_OT_select_palette_color)
     bpy.utils.unregister_class(MESH_OT_pick_vertex_color)
     bpy.utils.unregister_class(MESH_OT_assign_vertex_color)
-    bpy.utils.unregister_class(MESH_PT_vertex_color_panel)
+    bpy.utils.unregister_class(VertexColorPaletteEntry)
+    del bpy.types.WindowManager.vertex_color_palette
     del bpy.types.Scene.vertex_color_apply_mode
     del bpy.types.Scene.vertex_color_value
 
