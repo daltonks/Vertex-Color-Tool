@@ -112,16 +112,39 @@ def resolve_color_attribute(mesh):
     return target_attr
 
 
-def get_target_corner_indices(obj, mesh, apply_mode, original_mode):
+def get_target_corner_indices(obj, mesh, apply_mode, original_mode, bm=None):
     """Returns a list of corner indices to be colored."""
     if original_mode == 'OBJECT':
         return list(range(len(mesh.loops))), "object"
 
-    # In Edit Mode, we need to check selection
-    selected_face_indices = [p.index for p in mesh.polygons if p.select]
-    selected_vert_indices = {v.index for v in mesh.vertices if v.select}
+    # Use BMesh when available — it's the authoritative selection source in edit mode
+    if bm is not None:
+        if apply_mode == 'FACE':
+            indices = []
+            for f in bm.faces:
+                if f.select:
+                    indices.extend(mesh.polygons[f.index].loop_indices)
+            if indices:
+                return indices, "faces"
+            # No fully-selected faces (e.g. vertex/edge select mode with partial selection).
+            # Fall back to vertex-based painting so individual selections still work.
 
+        # VERTEX mode (and FACE fallback): collect verts from any selected element
+        sel_verts = set()
+        for v in bm.verts:
+            if v.select:
+                sel_verts.add(v.index)
+        for e in bm.edges:
+            if e.select:
+                sel_verts.update(v.index for v in e.verts)
+        for f in bm.faces:
+            if f.select:
+                sel_verts.update(v.index for v in f.verts)
+        return sorted(l.index for l in mesh.loops if l.vertex_index in sel_verts), "vertices"
+
+    # Fallback: read from mesh data (object mode)
     if apply_mode == 'FACE':
+        selected_face_indices = [p.index for p in mesh.polygons if p.select]
         if not selected_face_indices:
             return [], "faces"
         indices = []
@@ -129,19 +152,11 @@ def get_target_corner_indices(obj, mesh, apply_mode, original_mode):
             indices.extend(mesh.polygons[f_idx].loop_indices)
         return indices, "faces"
 
-    # VERTEX mode: find all loops attached to selected vertices or faces
-    if selected_face_indices:
-        # Expand selection to all vertices of selected faces
-        for f_idx in selected_face_indices:
-            selected_vert_indices.update(mesh.polygons[f_idx].vertices)
-
-    return sorted(
-        {
-            loop.index
-            for loop in mesh.loops
-            if loop.vertex_index in selected_vert_indices
-        }
-    ), "vertices"
+    selected_vert_indices = {v.index for v in mesh.vertices if v.select}
+    selected_face_indices = [p.index for p in mesh.polygons if p.select]
+    for f_idx in selected_face_indices:
+        selected_vert_indices.update(mesh.polygons[f_idx].vertices)
+    return sorted(l.index for l in mesh.loops if l.vertex_index in selected_vert_indices), "vertices"
 
 
 def target_mesh_objects(context):
@@ -608,15 +623,27 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
                 self.report({'ERROR'}, "No selected mesh objects")
                 return {'CANCELLED'}
 
-            if was_in_edit:
-                bpy.ops.object.mode_set(mode='OBJECT')
-
             color_value = context.scene.vertex_color_value
             apply_mode = context.scene.vertex_color_apply_mode
 
+            # Extract loop indices from BMesh before leaving edit mode
+            if was_in_edit:
+                work = []
+                for obj in objects:
+                    obj.update_from_editmode()
+                    bm = bmesh.from_edit_mesh(obj.data)
+                    bm.verts.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    bm.faces.ensure_lookup_table()
+                    indices, _ = get_target_corner_indices(obj, obj.data, apply_mode, original_mode, bm)
+                    work.append((obj, indices))
+                bpy.ops.object.mode_set(mode='OBJECT')
+            else:
+                work = [(obj, None) for obj in objects]
+
             total_loops_affected = 0
 
-            for obj in objects:
+            for obj, prebuilt in work:
                 mesh = obj.data
                 color_attr = resolve_color_attribute(mesh)
 
@@ -625,7 +652,7 @@ class MESH_OT_assign_vertex_color(bpy.types.Operator):
                 mesh.color_attributes.active_color_index = idx
                 mesh.color_attributes.render_color_index = idx
 
-                indices, _ = get_target_corner_indices(obj, mesh, apply_mode, original_mode)
+                indices = prebuilt if prebuilt is not None else get_target_corner_indices(obj, mesh, apply_mode, original_mode)[0]
 
                 if not indices:
                     continue
