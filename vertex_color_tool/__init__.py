@@ -8,6 +8,7 @@ bl_info = {
 }
 
 from array import array
+import sys
 
 import bpy
 
@@ -334,16 +335,20 @@ def register():
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     if kc:
+        # Use Ctrl+Shift on Windows/Linux, Cmd+Shift on macOS
+        use_oskey = sys.platform == 'darwin'
+        use_ctrl = not use_oskey
+
         km = kc.keymaps.new(name="Mesh", space_type='EMPTY')
-        kmi = km.keymap_items.new("mesh.assign_vertex_color", 'V', 'PRESS', oskey=True, shift=True)
+        kmi = km.keymap_items.new("mesh.assign_vertex_color", 'V', 'PRESS', oskey=use_oskey, ctrl=use_ctrl, shift=True)
         addon_keymaps.append((km, kmi))
-        kmi = km.keymap_items.new("mesh.pick_vertex_color", 'C', 'PRESS', oskey=True, shift=True)
+        kmi = km.keymap_items.new("mesh.pick_vertex_color", 'C', 'PRESS', oskey=use_oskey, ctrl=use_ctrl, shift=True)
         addon_keymaps.append((km, kmi))
 
         km = kc.keymaps.new(name="Object Mode", space_type='EMPTY')
-        kmi = km.keymap_items.new("mesh.assign_vertex_color", 'V', 'PRESS', oskey=True, shift=True)
+        kmi = km.keymap_items.new("mesh.assign_vertex_color", 'V', 'PRESS', oskey=use_oskey, ctrl=use_ctrl, shift=True)
         addon_keymaps.append((km, kmi))
-        kmi = km.keymap_items.new("mesh.pick_vertex_color", 'C', 'PRESS', oskey=True, shift=True)
+        kmi = km.keymap_items.new("mesh.pick_vertex_color", 'C', 'PRESS', oskey=use_oskey, ctrl=use_ctrl, shift=True)
         addon_keymaps.append((km, kmi))
 
 
