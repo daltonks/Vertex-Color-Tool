@@ -28,17 +28,20 @@ from .op_eyedropper import MESH_OT_pick_vertex_color
 from .op_paint import MESH_OT_assign_vertex_color
 from .palette_ops import (
     MESH_OT_edit_palette_color,
-    MESH_OT_scene_color_palette,
-    MESH_OT_select_palette_color,
     MESH_OT_trim_palette,
+    MESH_OT_use_palette_color,
+    MESH_OT_vertex_color_shortcuts,
+    MESH_PT_vertex_color_tool,
     VertexColorPaletteEntry,
+    register_previews,
+    unregister_previews,
 )
 from .palette_state import (
     on_file_loaded,
+    on_undo_redo,
     reset as reset_palette,
 )
 from .ui import (
-    draw_header,
     register_keymaps,
     register_properties,
     unregister_keymaps,
@@ -51,10 +54,11 @@ _classes = (
     VertexColorPaletteEntry,
     MESH_OT_pick_vertex_color,
     MESH_OT_assign_vertex_color,
-    MESH_OT_select_palette_color,
+    MESH_OT_use_palette_color,
     MESH_OT_edit_palette_color,
     MESH_OT_trim_palette,
-    MESH_OT_scene_color_palette,
+    MESH_OT_vertex_color_shortcuts,
+    MESH_PT_vertex_color_tool,
 )
 
 
@@ -69,8 +73,10 @@ def register():
     bpy.types.WindowManager.vertex_color_palette = bpy.props.CollectionProperty(
         type=VertexColorPaletteEntry,
     )
-    bpy.types.VIEW3D_HT_header.append(draw_header)
     bpy.app.handlers.load_post.append(on_file_loaded)
+    bpy.app.handlers.undo_post.append(on_undo_redo)
+    bpy.app.handlers.redo_post.append(on_undo_redo)
+    register_previews()
 
     register_properties()
     register_keymaps(_addon_keymaps)
@@ -83,10 +89,11 @@ def unregister():
     reset_palette()
     if on_file_loaded in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(on_file_loaded)
-    try:
-        bpy.types.VIEW3D_HT_header.remove(draw_header)
-    except ValueError:
-        pass
+    if on_undo_redo in bpy.app.handlers.undo_post:
+        bpy.app.handlers.undo_post.remove(on_undo_redo)
+    if on_undo_redo in bpy.app.handlers.redo_post:
+        bpy.app.handlers.redo_post.remove(on_undo_redo)
+    unregister_previews()
 
     for cls in reversed(_classes):
         try:

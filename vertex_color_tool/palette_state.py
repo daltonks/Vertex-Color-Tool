@@ -77,6 +77,9 @@ def ensure_scanned(scene):
             _palette_colors.update(collect_from_bmesh(obj.data))
         else:
             _palette_colors.update(collect_from_mesh(obj.data))
+    wm = bpy.context.window_manager
+    if hasattr(wm, 'vertex_color_palette'):
+        write_to_ui(wm)
 
 
 def add_colors(colors):
@@ -125,5 +128,30 @@ def on_file_loaded(*_args):
     _scanned = False
     _palette_colors.clear()
     palette_snapshot.clear()
+
+
+def on_undo_redo(scene):
+    """Handler for undo_post/redo_post — full additive scan.
+
+    Module-level palette state doesn't participate in Blender's undo, so
+    colors removed by palette edits may reappear in meshes after undo.
+    A full scan is the only reliable way to catch them.
+    """
+    added = False
+    for obj in scene.objects:
+        if obj.type != 'MESH':
+            continue
+        if obj.mode == 'EDIT':
+            new = collect_from_bmesh(obj.data) - _palette_colors
+        else:
+            new = collect_from_mesh(obj.data) - _palette_colors
+        if new:
+            _palette_colors.update(new)
+            added = True
+
+    if added:
+        wm = bpy.context.window_manager
+        if hasattr(wm, 'vertex_color_palette'):
+            write_to_ui(wm)
 
 

@@ -3,20 +3,6 @@ import sys
 import bpy
 
 
-def draw_header(self, context):
-    """Appended to VIEW3D_HT_header — draws the vertex color controls inline."""
-    layout = self.layout
-    scn = context.scene
-
-    row = layout.row(align=True)
-    row.separator()
-    mode_icon = 'FACESEL' if scn.vertex_color_apply_mode == 'FACE' else 'VERTEXSEL'
-    row.prop(scn, "vertex_color_apply_mode", text="", icon=mode_icon)
-    row.prop(scn, "vertex_color_value", text="")
-    row.operator("mesh.pick_vertex_color", text="", icon='EYEDROPPER')
-    row.operator("mesh.scene_color_palette", text="", icon='COLOR')
-    row.operator("mesh.assign_vertex_color", text="", icon='CHECKMARK')
-
 
 def register_properties():
     bpy.types.Scene.vertex_color_apply_mode = bpy.props.EnumProperty(
