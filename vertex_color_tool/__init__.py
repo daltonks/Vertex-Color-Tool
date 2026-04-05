@@ -175,6 +175,53 @@ def paint_color_indices(color_attr, indices, color_value):
     color_attr.data.foreach_set("color", colors)
 
 
+class MESH_OT_pick_vertex_color(bpy.types.Operator):
+    """Load the stored Color attribute from the current selection"""
+    bl_idname = "mesh.pick_vertex_color"
+    bl_label = "Use Selected Color"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        objects = target_mesh_objects(context)
+        if not objects:
+            self.report({'ERROR'}, "No selected mesh objects")
+            return {'CANCELLED'}
+
+        original_mode = context.mode
+        was_in_edit = original_mode == 'EDIT_MESH'
+
+        try:
+            if was_in_edit:
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+            apply_mode = context.scene.vertex_color_apply_mode
+
+            for obj in objects:
+                mesh = obj.data
+                color_attr = mesh.color_attributes.get(CANONICAL_COLOR_ATTRIBUTE_NAME)
+                if color_attr is None or color_attr.domain != 'CORNER':
+                    continue
+
+                indices, selection_source = get_target_corner_indices(
+                    obj, mesh, apply_mode, original_mode
+                )
+                if not indices:
+                    continue
+
+                context.scene.vertex_color_value = color_attr.data[indices[0]].color
+                self.report(
+                    {'INFO'},
+                    f"Loaded color from selected {selection_source} on '{obj.name}'"
+                )
+                return {'FINISHED'}
+
+            self.report({'WARNING'}, "No painted Color data found on the current selection")
+            return {'CANCELLED'}
+        finally:
+            if was_in_edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+
+
 class MESH_OT_assign_vertex_color(bpy.types.Operator):
     """Apply an RGBA color to selected geometry"""
     bl_idname = "mesh.assign_vertex_color"
@@ -251,11 +298,13 @@ class MESH_PT_vertex_color_panel(bpy.types.Panel):
         row = layout.row()
         row.label(text="Color:")
         row.prop(scn, "vertex_color_value", text="")
+        row.operator("mesh.pick_vertex_color", text="", icon='EYEDROPPER')
 
         layout.operator("mesh.assign_vertex_color", text="Apply to Selection", icon='CHECKMARK')
 
 
 def register():
+    bpy.utils.register_class(MESH_OT_pick_vertex_color)
     bpy.utils.register_class(MESH_OT_assign_vertex_color)
     bpy.utils.register_class(MESH_PT_vertex_color_panel)
 
@@ -278,6 +327,7 @@ def register():
 
 
 def unregister():
+    bpy.utils.unregister_class(MESH_OT_pick_vertex_color)
     bpy.utils.unregister_class(MESH_OT_assign_vertex_color)
     bpy.utils.unregister_class(MESH_PT_vertex_color_panel)
     del bpy.types.Scene.vertex_color_apply_mode
