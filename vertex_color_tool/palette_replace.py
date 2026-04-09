@@ -16,11 +16,11 @@ def replace_color_in_meshes(old_color, new_color):
         nr, ng, nb, na = new_color
         q = state.quantize
 
-        for mesh in bpy.data.meshes:
-            is_edit = any(obj.mode == 'EDIT' for obj in bpy.data.objects
-                          if obj.type == 'MESH' and obj.data == mesh)
+        edit_meshes = {obj.data for obj in bpy.data.objects
+                       if obj.type == 'MESH' and obj.mode == 'EDIT'}
 
-            if is_edit:
+        for mesh in bpy.data.meshes:
+            if mesh in edit_meshes:
                 _replace_bmesh(mesh, old_color, nr, ng, nb, na, q)
             else:
                 _replace_mesh(mesh, old_color, nr, ng, nb, na, q)

@@ -7,7 +7,7 @@ from .color_attr import (
     resolve_color_attribute,
 )
 from . import palette_state
-from .raycast import get_paint_targets
+from .raycast import get_paint_targets, invalidate_color_cache
 
 
 def _has_selection_edit(context):
@@ -88,6 +88,7 @@ def _paint_targets(targets, color_value, was_in_edit):
             total += len(loop_indices)
             mesh.update()
         if total > 0:
+            invalidate_color_cache()
             palette_state.add_colors({palette_state.quantize(*color_value)})
         return total
     finally:

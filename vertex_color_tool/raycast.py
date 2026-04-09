@@ -7,6 +7,25 @@ from mathutils.bvhtree import BVHTree
 from .color_attr import CANONICAL_COLOR_ATTRIBUTE_NAME
 
 
+_vert_loop_cache = {}  # mesh_ptr -> (n_loops, dict)
+
+
+def _loops_for_vertex(mesh, vertex_index):
+    """Return loop indices for a given vertex, using a cached lookup table."""
+    key = mesh.as_pointer()
+    n = len(mesh.loops)
+    cached = _vert_loop_cache.get(key)
+    if cached is not None and cached[0] == n:
+        lut = cached[1]
+    else:
+        from collections import defaultdict
+        lut = defaultdict(list)
+        for loop in mesh.loops:
+            lut[loop.vertex_index].append(loop.index)
+        _vert_loop_cache[key] = (n, lut)
+    return list(lut.get(vertex_index, ()))
+
+
 def find_view3d_region(context, mouse_x, mouse_y):
     """Return (area, region, region_3d) for the 3D viewport under the cursor."""
     for area in context.window.screen.areas:
@@ -59,6 +78,27 @@ def bvh_raycast(obj, ray_origin, ray_direction, mesh=None, bvh=None):
     return (mat @ loc - ray_origin).length_squared, face_index, loc
 
 
+_color_buf_cache = {}  # mesh_ptr -> (len, array)
+
+
+def _get_color_buffer(color_attr, mesh_ptr):
+    """Return the cached color buffer for a mesh, rebuilding if stale."""
+    n = len(color_attr.data)
+    cached = _color_buf_cache.get(mesh_ptr)
+    if cached is not None and cached[0] == n:
+        return cached[1]
+    buf = array('f', [0.0]) * (n * 4)
+    color_attr.data.foreach_get("color", buf)
+    _color_buf_cache[mesh_ptr] = (n, buf)
+    return buf
+
+
+def invalidate_color_cache():
+    """Clear cached mesh data (call after painting or undo)."""
+    _color_buf_cache.clear()
+    _vert_loop_cache.clear()
+
+
 def _sample_color_mesh(mesh, color_attr, face_index, hit_local):
     """Sample the closest loop color from mesh data."""
     polygon = mesh.polygons[face_index]
@@ -66,8 +106,7 @@ def _sample_color_mesh(mesh, color_attr, face_index, hit_local):
     if not loop_indices:
         return None
 
-    colors = array('f', [0.0]) * (len(color_attr.data) * 4)
-    color_attr.data.foreach_get("color", colors)
+    colors = _get_color_buffer(color_attr, mesh.as_pointer())
 
     best = min(
         loop_indices,
@@ -198,7 +237,7 @@ def get_paint_targets(context, mouse_x, mouse_y, bvh_cache=None):
                 polygon.vertices,
                 key=lambda vi: (mesh.vertices[vi].co - loc).length_squared,
             )
-            loop_indices = [l.index for l in mesh.loops if l.vertex_index == nearest_vi]
+            loop_indices = _loops_for_vertex(mesh, nearest_vi)
         else:
             verts = list(polygon.vertices)
             pairs = [(verts[i], verts[(i + 1) % len(verts)]) for i in range(len(verts))]
@@ -208,7 +247,7 @@ def get_paint_targets(context, mouse_x, mouse_y, bvh_cache=None):
                     (mesh.vertices[p[0]].co + mesh.vertices[p[1]].co) / 2 - loc
                 ).length_squared,
             )
-            loop_indices = [l.index for l in mesh.loops if l.vertex_index in {v0, v1}]
+            loop_indices = _loops_for_vertex(mesh, v0) + _loops_for_vertex(mesh, v1)
 
         return [(obj, loop_indices)], None
 

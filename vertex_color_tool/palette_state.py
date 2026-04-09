@@ -6,6 +6,7 @@ import bpy
 import bmesh
 
 from .color_attr import CANONICAL_COLOR_ATTRIBUTE_NAME
+from .raycast import invalidate_color_cache
 
 _palette_colors = []   # list of quantized color tuples, insertion order
 _palette_set = set()   # for fast membership checks
@@ -139,6 +140,7 @@ def reset():
     _palette_colors.clear()
     _palette_set.clear()
     palette_snapshot.clear()
+    invalidate_color_cache()
 
 
 def on_file_loaded(*_args):
@@ -148,11 +150,29 @@ def on_file_loaded(*_args):
     _palette_colors.clear()
     _palette_set.clear()
     palette_snapshot.clear()
+    invalidate_color_cache()
+
+
+_undo_pending = False
 
 
 def on_undo_redo(scene):
-    """Handler for undo_post/redo_post — full reconciliation."""
-    if reconcile(scene):
+    """Handler for undo_post/redo_post — debounced reconciliation."""
+    global _undo_pending
+    invalidate_color_cache()
+    if _undo_pending:
+        return
+    _undo_pending = True
+    bpy.app.timers.register(_deferred_reconcile, first_interval=0.05)
+
+
+def _deferred_reconcile():
+    """Run reconciliation after undo/redo settles."""
+    global _undo_pending
+    _undo_pending = False
+    scene = bpy.context.scene
+    if scene is not None and reconcile(scene):
         wm = bpy.context.window_manager
         if hasattr(wm, 'vertex_color_palette'):
             write_to_ui(wm)
+    return None

@@ -18,10 +18,14 @@ def _copy_point_to_corner(mesh, source_attr, target_attr):
     point_colors = array('f', [0.0]) * (len(source_attr.data) * 4)
     source_attr.data.foreach_get("color", point_colors)
 
-    corner_colors = array('f', [0.0]) * (len(target_attr.data) * 4)
-    for loop in mesh.loops:
-        src = loop.vertex_index * 4
-        dst = loop.index * 4
+    n = len(target_attr.data)
+    vert_indices = array('i', [0]) * n
+    mesh.loops.foreach_get("vertex_index", vert_indices)
+
+    corner_colors = array('f', [0.0]) * (n * 4)
+    for i, vi in enumerate(vert_indices):
+        src = vi * 4
+        dst = i * 4
         corner_colors[dst:dst + 4] = point_colors[src:src + 4]
 
     target_attr.data.foreach_set("color", corner_colors)
@@ -130,11 +134,19 @@ def get_target_corner_indices(obj, mesh, original_mode, bm=None):
         for f in bm.faces:
             if f.select:
                 sel_verts.update(v.index for v in f.verts)
-        return sorted(l.index for l in mesh.loops if l.vertex_index in sel_verts), "vertices"
+        return _loops_for_selected_verts(mesh, sel_verts), "vertices"
 
     # Fallback: read from mesh data (object mode)
     sel_verts = {v.index for v in mesh.vertices if v.select}
     for p in mesh.polygons:
         if p.select:
             sel_verts.update(p.vertices)
-    return sorted(l.index for l in mesh.loops if l.vertex_index in sel_verts), "vertices"
+    return _loops_for_selected_verts(mesh, sel_verts), "vertices"
+
+
+def _loops_for_selected_verts(mesh, sel_verts):
+    """Return sorted loop indices whose vertex is in sel_verts."""
+    n = len(mesh.loops)
+    vert_indices = array('i', [0]) * n
+    mesh.loops.foreach_get("vertex_index", vert_indices)
+    return sorted(i for i, vi in enumerate(vert_indices) if vi in sel_verts)
