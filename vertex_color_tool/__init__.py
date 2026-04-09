@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Vertex Color Tool",
-    "blender": (5, 0, 0),
+    "blender": (5, 1, 0),
     "category": "Mesh",
     "version": (1, 4, 0),
     "author": "BobHop & Dalton Spillman",
