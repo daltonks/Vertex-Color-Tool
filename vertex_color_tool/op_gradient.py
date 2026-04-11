@@ -4,11 +4,8 @@ from array import array
 from mathutils import Vector
 from bpy_extras import view3d_utils
 
-from .color_attr import (
-    get_target_corner_indices,
-    paint_gradient_indices,
-    resolve_color_attribute,
-)
+from .color_attr import resolve_color_attribute
+from .paint import get_target_corner_indices, paint_gradient_indices
 from . import palette_state
 from .raycast import find_view3d_region, invalidate_color_cache
 

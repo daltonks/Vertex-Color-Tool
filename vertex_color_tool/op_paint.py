@@ -1,11 +1,8 @@
 import bpy
 import bmesh
 
-from .color_attr import (
-    get_target_corner_indices,
-    paint_color_indices,
-    resolve_color_attribute,
-)
+from .color_attr import resolve_color_attribute
+from .paint import get_target_corner_indices, paint_color_indices
 from . import palette_state
 from .raycast import get_paint_targets, invalidate_color_cache
 

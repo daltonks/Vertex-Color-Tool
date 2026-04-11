@@ -11,9 +11,10 @@ bl_info = {
 
 if "bpy" in locals():
     import importlib
-    from . import color_attr, raycast, palette_state, palette_replace, palette_ops
-    from . import op_eyedropper, op_gradient, op_paint, ui
+    from . import color_attr, paint, raycast, palette_state, palette_replace
+    from . import palette_ops, op_eyedropper, op_gradient, op_paint, ui
     importlib.reload(color_attr)
+    importlib.reload(paint)
     importlib.reload(raycast)
     importlib.reload(palette_state)
     importlib.reload(palette_replace)
