@@ -116,6 +116,7 @@ class MESH_OT_vertex_color_shortcuts(bpy.types.Operator):
         layout = self.layout
         layout.label(text=f"{mod}+Shift+V — Paint")
         layout.label(text=f"{mod}+Shift+C — Eyedropper")
+        layout.label(text=f"{mod}+Shift+G — Gradient")
 
     def execute(self, context):
         return {'FINISHED'}
@@ -142,6 +143,10 @@ class MESH_PT_vertex_color_tool(bpy.types.Panel):
         row.prop(scn, "vertex_color_value", text="")
         row.operator("mesh.edit_palette_color", text="", icon='GREASEPENCIL')
         row.operator("mesh.vertex_color_shortcuts", text="", icon='INFO')
+
+        grad_row = layout.row(align=True)
+        grad_row.prop(scn, "vertex_color_gradient_end", text="")
+        grad_row.operator("mesh.vertex_color_gradient", text="Gradient", icon='SMOOTHCURVE')
 
         state.ensure_scanned(context.scene)
         palette = context.window_manager.vertex_color_palette

@@ -13,9 +13,19 @@ def register_properties():
         max=1.0,
         default=(1.0, 1.0, 1.0, 1.0),
     )
+    bpy.types.Scene.vertex_color_gradient_end = bpy.props.FloatVectorProperty(
+        name="Gradient End",
+        description="The second color used by the gradient tool",
+        subtype='COLOR',
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(0.0, 0.0, 0.0, 1.0),
+    )
 
 
 def unregister_properties():
+    del bpy.types.Scene.vertex_color_gradient_end
     del bpy.types.Scene.vertex_color_value
 
 
@@ -37,6 +47,11 @@ def register_keymaps(keymaps_list):
         keymaps_list.append((km, kmi))
         kmi = km.keymap_items.new(
             "mesh.pick_vertex_color", 'C', 'PRESS',
+            oskey=use_oskey, ctrl=use_ctrl, shift=True,
+        )
+        keymaps_list.append((km, kmi))
+        kmi = km.keymap_items.new(
+            "mesh.vertex_color_gradient", 'G', 'PRESS',
             oskey=use_oskey, ctrl=use_ctrl, shift=True,
         )
         keymaps_list.append((km, kmi))

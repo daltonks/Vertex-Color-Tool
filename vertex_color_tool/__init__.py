@@ -12,19 +12,21 @@ bl_info = {
 if "bpy" in locals():
     import importlib
     from . import color_attr, raycast, palette_state, palette_replace, palette_ops
-    from . import op_eyedropper, op_paint, ui
+    from . import op_eyedropper, op_gradient, op_paint, ui
     importlib.reload(color_attr)
     importlib.reload(raycast)
     importlib.reload(palette_state)
     importlib.reload(palette_replace)
     importlib.reload(palette_ops)
     importlib.reload(op_eyedropper)
+    importlib.reload(op_gradient)
     importlib.reload(op_paint)
     importlib.reload(ui)
 
 import bpy
 
 from .op_eyedropper import MESH_OT_pick_vertex_color
+from .op_gradient import MESH_OT_vertex_color_gradient
 from .op_paint import MESH_OT_assign_vertex_color
 from .palette_ops import (
     MESH_OT_edit_palette_color,
@@ -53,6 +55,7 @@ _addon_keymaps = []
 _classes = (
     VertexColorPaletteEntry,
     MESH_OT_pick_vertex_color,
+    MESH_OT_vertex_color_gradient,
     MESH_OT_assign_vertex_color,
     MESH_OT_use_palette_color,
     MESH_OT_edit_palette_color,
