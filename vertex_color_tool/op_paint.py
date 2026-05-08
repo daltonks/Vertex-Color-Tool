@@ -3,7 +3,6 @@ import bmesh
 
 from .color_attr import resolve_color_attribute
 from .paint import get_target_corner_indices, paint_color_indices
-from . import palette_state
 from .raycast import get_paint_targets, invalidate_color_cache
 
 
@@ -70,7 +69,7 @@ def _resolve_selection_targets(context):
 
 
 def _paint_targets(targets, color_value, was_in_edit):
-    """Paint color onto (obj, loop_indices) pairs, handling mode switches and palette update."""
+    """Paint color onto (obj, loop_indices) pairs, handling mode switches."""
     try:
         if was_in_edit:
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -86,7 +85,6 @@ def _paint_targets(targets, color_value, was_in_edit):
             mesh.update()
         if total > 0:
             invalidate_color_cache()
-            palette_state.add_colors({palette_state.quantize(*color_value)})
         return total
     finally:
         if was_in_edit:

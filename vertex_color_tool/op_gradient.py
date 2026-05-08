@@ -6,7 +6,6 @@ from bpy_extras import view3d_utils
 
 from .color_attr import resolve_color_attribute
 from .paint import get_target_corner_indices, paint_gradient_indices
-from . import palette_state
 from .raycast import find_view3d_region, invalidate_color_cache
 
 
@@ -203,9 +202,6 @@ class MESH_OT_vertex_color_gradient(bpy.types.Operator):
                     mesh.update()
         else:
             invalidate_color_cache()
-            color_a = palette_state.quantize(*bpy.context.scene.vertex_color_value)
-            color_b = palette_state.quantize(*bpy.context.scene.vertex_color_gradient_end)
-            palette_state.add_colors({color_a, color_b})
 
         context.workspace.status_text_set(None)
         if self._was_in_edit:
